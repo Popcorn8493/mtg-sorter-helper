@@ -26,6 +26,7 @@ class SetAnalyzerTab(QWidget):
         self.sorter_tab = sorter_tab  # Keep a reference to the sorter tab
         self.worker = None
         self.last_analysis_data = None
+        self.options = {}  # Initialize options attribute
         main_layout = QHBoxLayout(self)
         controls_group = QGroupBox("Analysis Options")
         controls_layout = QVBoxLayout(controls_group)
@@ -109,19 +110,19 @@ class SetAnalyzerTab(QWidget):
                 return
             owned_cards = self.sorter_tab.all_cards
 
-        options = {'set_code': set_code, 'weighted': self.weighted_check.isChecked(),
-                   'preset': self.preset_combo.currentText(), 'group': self.group_check.isChecked(),
-                   'threshold': threshold, 'owned_cards': owned_cards}
+        self.options = {'set_code': set_code, 'weighted': self.weighted_check.isChecked(),
+                        'preset': self.preset_combo.currentText(), 'group': self.group_check.isChecked(),
+                        'threshold': threshold, 'owned_cards': owned_cards}
 
         if self.export_check.isChecked():
             filepath, _ = QFileDialog.askSaveAsFileName(self, "Save Analysis CSV", f"{set_code}_analysis.csv",
                                                         "CSV Files (*.csv)")
             if not filepath: return
-            options['export_path'] = filepath
+            self.options['export_path'] = filepath
 
         self.run_button.setEnabled(False)
         self.status_label.setText(f"Running analysis for '{set_code.upper()}'...")
-        self.worker = SetAnalysisWorker(options, self.api)
+        self.worker = SetAnalysisWorker(self.options, self.api)
         self.worker.finished.connect(self.on_analysis_finished)
         self.worker.error.connect(self.on_analysis_error)
         self.worker.start()
