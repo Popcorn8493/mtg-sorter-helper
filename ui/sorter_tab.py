@@ -1,11 +1,12 @@
 import csv
 import pathlib
 import collections
+import string
 from typing import Dict, List
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox, QListWidget,
+    QPushButton, QLabel, QLineEdit, QComboBox, QListWidget, QCheckBox,
     QGroupBox, QFileDialog, QMessageBox, QProgressBar, QStackedWidget, QSplitter,
     QTreeWidgetItem, QTreeWidgetItemIterator, QHeaderView, QTreeWidget
 )
@@ -31,8 +32,8 @@ class ManaBoxSorterTab(QWidget):
 
         main_layout = QVBoxLayout(self)
         self._create_import_section(main_layout)
-        self._create_sort_order_section(main_layout)
-        self._create_analysis_section(main_layout)
+        self._create_options_section(main_layout)
+        self._create_run_section(main_layout)
         self._create_results_section(main_layout)
 
     def _create_import_section(self, layout: QVBoxLayout):
@@ -50,10 +51,15 @@ class ManaBoxSorterTab(QWidget):
         group_layout.addWidget(self.file_label)
         group_layout.addWidget(self.progress_bar)
 
-    def _create_sort_order_section(self, layout: QVBoxLayout):
-        group = QGroupBox("2. Define Sort Order")
-        layout.addWidget(group)
-        grid = QGridLayout(group)
+    def _create_options_section(self, layout: QVBoxLayout):
+        options_group = QGroupBox("2. Sorting Options")
+        options_layout = QHBoxLayout(options_group)
+        layout.addWidget(options_group)
+
+        # Sorting Order Group
+        sort_order_group = QGroupBox("Sort Order")
+        options_layout.addWidget(sort_order_group, 2)
+        grid = QGridLayout(sort_order_group)
         self.available_list = QListWidget()
         self.available_list.addItems(
             ["Set", "Color Identity", "Rarity", "Type Line", "Name", "Condition", "Commander Staple"])
@@ -83,17 +89,29 @@ class ManaBoxSorterTab(QWidget):
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(2, 1)
 
-    def _create_analysis_section(self, layout: QVBoxLayout):
-        group = QGroupBox("3. Run Analysis")
+        # Set Sorting Plan Group
+        set_plan_group = QGroupBox("Set Sorting Plan")
+        options_layout.addWidget(set_plan_group, 1)
+        set_plan_layout = QVBoxLayout(set_plan_group)
+        self.group_low_count_check = QCheckBox("Group low-count letters into piles")
+        self.group_low_count_check.setChecked(True)
+        set_plan_layout.addWidget(self.group_low_count_check)
+        threshold_layout = QHBoxLayout()
+        threshold_layout.addWidget(QLabel("Min pile total:"))
+        self.group_threshold_edit = QLineEdit("20")
+        threshold_layout.addWidget(self.group_threshold_edit)
+        set_plan_layout.addLayout(threshold_layout)
+        set_plan_layout.addStretch()
+
+    def _create_run_section(self, layout: QVBoxLayout):
+        group = QGroupBox("3. Generate Plan")
         layout.addWidget(group)
         h_layout = QHBoxLayout(group)
-        h_layout.addWidget(QLabel("Optimize starting groups by:"))
-        self.optimize_combo = QComboBox()
-        self.optimize_combo.addItems(["Most Cards", "Alphabetical"])
-        h_layout.addWidget(self.optimize_combo)
+        h_layout.addStretch()
         self.run_button = QPushButton("Generate Sorting Plan")
         self.run_button.clicked.connect(self.generate_plan)
         h_layout.addWidget(self.run_button)
+        h_layout.addStretch()
 
     def _create_results_section(self, layout: QVBoxLayout):
         group = QGroupBox("4. Sorting Plan")
@@ -304,7 +322,7 @@ class ManaBoxSorterTab(QWidget):
         piles_group = QGroupBox("Sorting Piles")
         piles_layout = QVBoxLayout(piles_group)
         tree = QTreeWidget()
-        tree.setHeaderLabels(["Pile (by First Letter)", "Unsorted Count"])
+        tree.setHeaderLabels(["Pile", "Unsorted Count"])
         tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         tree.setSortingEnabled(True)
         piles_layout.addWidget(tree)
@@ -344,8 +362,53 @@ class ManaBoxSorterTab(QWidget):
                 return
 
             piles = collections.defaultdict(list)
-            for card in current_unsorted:
-                piles[card.name[0].upper()].append(card)
+
+            if self.group_low_count_check.isChecked():
+                try:
+                    threshold = int(self.group_threshold_edit.text())
+                except ValueError:
+                    threshold = 20
+
+                raw_letter_totals = collections.defaultdict(int)
+                for card in current_unsorted:
+                    if card.name and card.name != 'N/A':
+                        raw_letter_totals[card.name[0].upper()] += (card.quantity - card.sorted_count)
+
+                # --- START FINAL IMPLEMENTATION ---
+                # This logic is a direct, in-line implementation of the working Set Analyzer algorithm.
+                mapping = {}
+                buf, tot = "", 0
+
+                def flush():
+                    nonlocal buf, tot
+                    if buf:
+                        for ch in buf: mapping[ch] = buf
+                        buf, tot = "", 0
+
+                letters = string.ascii_uppercase
+                for i, l in enumerate(letters):
+                    if raw_letter_totals.get(l, 0) < threshold:
+                        buf += l
+                        tot += raw_letter_totals.get(l, 0)
+                        if tot >= threshold or not (i < 25 and raw_letter_totals.get(letters[i + 1], 0) < threshold):
+                            flush()
+                    else:
+                        flush()
+                        mapping[l] = l
+                flush()
+                # --- END FINAL IMPLEMENTATION ---
+
+                for card in current_unsorted:
+                    if card.name and card.name != 'N/A':
+                        first_letter = card.name[0].upper()
+                        # Use the generated map; default to the letter itself if somehow not in the map
+                        pile_key = mapping.get(first_letter, first_letter)
+                        piles[pile_key].append(card)
+            else:
+                # Original behavior if the box is unchecked
+                for card in current_unsorted:
+                    if card.name and card.name != 'N/A':
+                        piles[card.name[0].upper()].append(card)
 
             nodes = []
             for name, pile_cards in piles.items():
