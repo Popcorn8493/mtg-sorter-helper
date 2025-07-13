@@ -25,6 +25,7 @@ class MTGToolkitWindow(QMainWindow):
         tab_widget.addTab(self.analyzer_tab, "Set Analyzer")
 
         self.load_settings()
+        self.sorter_tab.initial_load()  # Trigger auto-load of last session
 
     def load_settings(self):
         self.analyzer_tab.set_code_edit.setText(self.settings.value("analyzer/lastSetCode", "", str))
@@ -33,10 +34,19 @@ class MTGToolkitWindow(QMainWindow):
         for item_text in selected_items: self.sorter_tab.selected_list.addItem(item_text)
 
     def save_settings(self):
+        # Analyzer settings
         self.settings.setValue("analyzer/lastSetCode", self.analyzer_tab.set_code_edit.text())
+
+        # Sorter settings
         selected_items = [self.sorter_tab.selected_list.item(i).text() for i in
                           range(self.sorter_tab.selected_list.count())]
         self.settings.setValue("sorter/sortCriteria", selected_items)
+
+        # Save sorting progress
+        if self.sorter_tab.all_cards and self.sorter_tab.last_csv_path:
+            progress = {c.scryfall_id: c.sorted_count for c in self.sorter_tab.all_cards if c.sorted_count > 0}
+            self.settings.setValue("sorter/progress", progress)
+            self.settings.setValue("sorter/lastCsvPath", self.sorter_tab.last_csv_path)
 
     def closeEvent(self, event):
         self.save_settings();
