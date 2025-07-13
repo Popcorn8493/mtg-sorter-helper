@@ -8,7 +8,7 @@ Python tool for analyzing the frequency of starting letters in card names from a
 - Automatically caches data to avoid repeated downloads
 - Weights card counts by rarity (commons, uncommons, rares, mythics)
 - Supports “Play Booster” rarity distributions
-- Interactive GUI built with Tkinter
+- Interactive GUI
 - Optional CSV export and visual bar chart display
 
 ## Example
