@@ -1,12 +1,12 @@
 import csv
 from typing import TYPE_CHECKING
 
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QComboBox, QCheckBox,
     QGroupBox, QFileDialog, QMessageBox, QProgressBar, QTextEdit
 )
-from PyQt6.QtCore import QTimer, pyqtSignal
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
@@ -287,7 +287,7 @@ class SetAnalyzerTab(QWidget):
                 self,
                 "Save Analysis CSV",
                 f"{set_code}_analysis.csv",
-                "CSV Files (*.csv);;All Files (*.*)"
+                "CSV Files (*.csv)All Files (*.*)"
             )
             if not filepath:
                 return

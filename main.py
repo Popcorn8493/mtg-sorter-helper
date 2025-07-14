@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 
-
-import sys
-import os
 import argparse
 import logging
-from pathlib import Path
+import os
+import sys
 
-from PyQt6.QtWidgets import QApplication, QSplashScreen, QMessageBox
+from PyQt6.QtCore import Qt, QCoreApplication
 from PyQt6.QtGui import QFont, QPixmap, QPainter, QColor
-from PyQt6.QtCore import Qt, QTimer, QThread, QCoreApplication
+from PyQt6.QtWidgets import QApplication, QSplashScreen, QMessageBox
 
+from core.constants import Config, ThemeManager
 # Local application imports
 from ui.main_window import MTGToolkitWindow
-from core.constants import Config, ThemeManager
 
 
 def setup_logging():
