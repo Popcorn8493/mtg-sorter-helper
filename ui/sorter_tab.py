@@ -10,12 +10,12 @@ from PyQt6.QtWidgets import (
     QGroupBox, QFileDialog, QMessageBox, QProgressBar, QStackedWidget, QSplitter,
     QTreeWidgetItem, QTreeWidgetItemIterator, QHeaderView, QTreeWidget, QAbstractItemView
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QPixmap, QColor
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from api.scryfall_api import ScryfallAPI
+from api.scryfall_api import ScryfallAPI, MTGAPIError
 from workers.threads import CsvImportWorker, ImageFetchWorker
 from ui.custom_widgets import SortableTreeWidgetItem, NavigableTreeWidget
 from core.models import Card, SortGroup
@@ -57,10 +57,12 @@ class SetSorterView(QWidget):
         self.tree.setHeaderLabels(["Pile", "Unsorted Count"])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.setSortingEnabled(True)
+        self.tree.setToolTip("Double-click a pile to mark it as sorted, or select multiple piles and use the button")
         piles_layout.addWidget(self.tree)
         right_layout.addWidget(piles_group)
         controls_layout = QHBoxLayout()
         mark_pile_button = QPushButton("Mark Selected as Sorted")
+        mark_pile_button.setToolTip("Mark the selected pile(s) as completely sorted (Shortcut: Space)")
         controls_layout.addWidget(mark_pile_button)
         right_layout.addLayout(controls_layout)
         splitter.addWidget(right_panel)
@@ -187,6 +189,12 @@ class SetSorterView(QWidget):
 
 
 class ManaBoxSorterTab(QWidget):
+    # Signals for communication with main window
+    collection_loaded = pyqtSignal()
+    progress_updated = pyqtSignal(int)
+    operation_started = pyqtSignal(str, int)  # message, max_value
+    operation_finished = pyqtSignal()
+
     def __init__(self, api: ScryfallAPI):
         super().__init__()
         self.api = api
@@ -217,11 +225,14 @@ class ManaBoxSorterTab(QWidget):
         group_layout = QVBoxLayout(group)
         self.import_button = QPushButton("Import ManaBox CSV")
         self.import_button.setObjectName("AccentButton")
+        self.import_button.setToolTip("Import a ManaBox CSV export file containing your collection (Shortcut: Ctrl+O)")
         self.import_button.clicked.connect(self.import_csv)
         self.file_label = QLabel("No file loaded.")
         self.file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.file_label.setToolTip("Shows the currently loaded collection file and status")
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
+        self.progress_bar.setToolTip("Shows progress of card data fetching from Scryfall")
         group_layout.addWidget(self.import_button)
         group_layout.addWidget(self.file_label)
         group_layout.addWidget(self.progress_bar)
@@ -231,19 +242,27 @@ class ManaBoxSorterTab(QWidget):
         options_layout = QHBoxLayout(options_group)
         layout.addWidget(options_group)
         sort_order_group = QGroupBox("Sort Order")
+        sort_order_group.setToolTip(
+            "Define the hierarchy for organizing your cards. Cards will be grouped by the first criterion, then sub-grouped by the second, etc.")
         options_layout.addWidget(sort_order_group, 2)
         grid = QGridLayout(sort_order_group)
         self.available_list = QListWidget()
         self.available_list.addItems(
             ["Set", "Color Identity", "Rarity", "Type Line", "Name", "Condition", "Commander Staple"])
+        self.available_list.setToolTip("Available sorting criteria. Double-click or use >> to add to sort order.")
         self.selected_list = QListWidget()
+        self.selected_list.setToolTip("Your sorting hierarchy. Use Up/Down to reorder, << to remove criteria.")
         add_button = QPushButton(">>");
+        add_button.setToolTip("Add selected criterion to sort order")
         add_button.clicked.connect(self.add_criterion)
         remove_button = QPushButton("<<");
+        remove_button.setToolTip("Remove selected criterion from sort order")
         remove_button.clicked.connect(self.remove_criterion)
         up_button = QPushButton("Up");
+        up_button.setToolTip("Move selected criterion up in priority")
         up_button.clicked.connect(self.move_up)
         down_button = QPushButton("Down");
+        down_button.setToolTip("Move selected criterion down in priority")
         down_button.clicked.connect(self.move_down)
         btn_layout = QVBoxLayout();
         btn_layout.addStretch();
@@ -262,14 +281,18 @@ class ManaBoxSorterTab(QWidget):
         grid.setColumnStretch(0, 1);
         grid.setColumnStretch(2, 1)
         set_plan_group = QGroupBox("Set Sorting Plan")
+        set_plan_group.setToolTip("Options for optimizing letter-based sorting within sets")
         options_layout.addWidget(set_plan_group, 1)
         set_plan_layout = QVBoxLayout(set_plan_group)
         self.group_low_count_check = QCheckBox("Group low-count letters into piles");
         self.group_low_count_check.setChecked(True)
+        self.group_low_count_check.setToolTip(
+            "Combine letters with few cards into larger piles for more efficient sorting")
         set_plan_layout.addWidget(self.group_low_count_check)
         threshold_layout = QHBoxLayout()
         threshold_layout.addWidget(QLabel("Min pile total:"))
         self.group_threshold_edit = QLineEdit("20")
+        self.group_threshold_edit.setToolTip("Minimum number of cards per pile when grouping letters together")
         threshold_layout.addWidget(self.group_threshold_edit)
         set_plan_layout.addLayout(threshold_layout)
         set_plan_layout.addStretch()
@@ -280,6 +303,7 @@ class ManaBoxSorterTab(QWidget):
         h_layout = QHBoxLayout(group)
         h_layout.addStretch()
         self.run_button = QPushButton("Generate Sorting Plan")
+        self.run_button.setToolTip("Create a visual sorting plan based on your criteria (Shortcut: Ctrl+G)")
         self.run_button.clicked.connect(self.generate_plan)
         h_layout.addWidget(self.run_button)
         h_layout.addStretch()
@@ -293,18 +317,22 @@ class ManaBoxSorterTab(QWidget):
         self.breadcrumb_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         top_bar_layout.addLayout(self.breadcrumb_layout, 1)
         self.show_sorted_check = QCheckBox("Show Sorted Groups")
+        self.show_sorted_check.setToolTip("Include already-sorted cards in the display")
         self.show_sorted_check.stateChanged.connect(self.on_show_sorted_toggled)
         top_bar_layout.addWidget(self.show_sorted_check)
         top_bar_layout.addStretch()
         self.sort_set_button = QPushButton("Sort This Set");
+        self.sort_set_button.setToolTip("Open detailed sorting view for the selected set")
         self.sort_set_button.clicked.connect(self.on_sort_set_clicked);
         self.sort_set_button.setVisible(False)
         top_bar_layout.addWidget(self.sort_set_button)
         self.mark_sorted_button = QPushButton("Mark Group as Sorted");
+        self.mark_sorted_button.setToolTip("Mark all cards in the selected group(s) as sorted (Shortcut: Space)")
         self.mark_sorted_button.clicked.connect(self.on_mark_group_button_clicked);
         self.mark_sorted_button.setVisible(False)
         top_bar_layout.addWidget(self.mark_sorted_button)
         self.export_button = QPushButton("Export View");
+        self.export_button.setToolTip("Export the current view to a CSV file (Shortcut: Ctrl+E)")
         self.export_button.clicked.connect(self.export_current_view);
         self.export_button.setVisible(False)
         top_bar_layout.addWidget(self.export_button)
@@ -314,6 +342,7 @@ class ManaBoxSorterTab(QWidget):
         left_layout = QVBoxLayout(left_panel)
         self.filter_edit = QLineEdit();
         self.filter_edit.setPlaceholderText("Filter current view...");
+        self.filter_edit.setToolTip("Type to filter the current view by group name")
         self.filter_edit.textChanged.connect(self.filter_current_view);
         self.filter_edit.setVisible(False)
         self.results_stack = QStackedWidget()
@@ -325,9 +354,11 @@ class ManaBoxSorterTab(QWidget):
         self.card_image_label.setObjectName("CardImageLabel");
         self.card_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter);
         self.card_image_label.setMinimumSize(220, 308)
+        self.card_image_label.setToolTip("Card images appear here when you select individual cards")
         self.card_details_label = QLabel();
         self.card_details_label.setAlignment(Qt.AlignmentFlag.AlignTop);
         self.card_details_label.setWordWrap(True)
+        self.card_details_label.setToolTip("Detailed card information appears here")
         right_layout.addWidget(self.card_image_label);
         right_layout.addWidget(self.card_details_label);
         right_layout.addStretch()
@@ -348,16 +379,76 @@ class ManaBoxSorterTab(QWidget):
             self.generate_plan()
 
     def import_csv(self, filepath=None):
+        if self.is_loading:
+            QMessageBox.information(self, "Import in Progress", "Please wait for the current import to complete.")
+            return
+
         if not filepath:
-            filepath, _ = QFileDialog.getOpenFileName(self, "Open ManaBox CSV", "", "CSV Files (*.csv)")
-            if not filepath: return
+            filepath, _ = QFileDialog.getOpenFileName(
+                self,
+                "Open ManaBox CSV",
+                "",
+                "CSV Files (*.csv);;All Files (*.*)"
+            )
+            if not filepath:
+                return
+
+        # Validate file exists and is readable
+        try:
+            file_path = pathlib.Path(filepath)
+            if not file_path.exists():
+                QMessageBox.critical(
+                    self,
+                    "File Not Found",
+                    f"The file '{filepath}' does not exist.\n\nPlease check the file path and try again."
+                )
+                return
+
+            if not file_path.is_file():
+                QMessageBox.critical(
+                    self,
+                    "Invalid File",
+                    f"'{filepath}' is not a valid file.\n\nPlease select a CSV file exported from ManaBox."
+                )
+                return
+
+            # Quick validation of CSV structure
+            with open(filepath, 'r', encoding='utf-8') as f:
+                first_few_lines = [f.readline() for _ in range(5)]
+                header_found = any('Scryfall ID' in line and 'Quantity' in line for line in first_few_lines)
+                if not header_found:
+                    reply = QMessageBox.question(
+                        self,
+                        "Unrecognized Format",
+                        "This file doesn't appear to be a standard ManaBox CSV export.\n"
+                        "It should contain 'Scryfall ID' and 'Quantity' columns.\n\n"
+                        "Do you want to try importing it anyway?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "File Access Error",
+                f"Unable to read the file '{filepath}':\n\n{str(e)}\n\n"
+                "Please check file permissions and try again."
+            )
+            return
+
         self.is_loading = True;
         self.last_csv_path = filepath
         self.import_button.setEnabled(False);
         self.run_button.setEnabled(False)
-        self.file_label.setText(f"Loading {pathlib.Path(filepath).name}...")
+        filename = pathlib.Path(filepath).name
+        self.file_label.setText(f"Loading {filename}...")
         self.progress_bar.setVisible(True);
         self.progress_bar.setRange(0, 0)
+
+        # Emit signal for status bar
+        self.operation_started.emit(f"Importing {filename}", 0)
+
         self.worker = CsvImportWorker(filepath, self.api)
         self.worker.progress.connect(self.update_progress)
         self.worker.finished.connect(self.on_import_finished)
@@ -365,9 +456,13 @@ class ManaBoxSorterTab(QWidget):
         self.worker.start()
 
     def update_progress(self, value, total):
-        if self.progress_bar.maximum() != total: self.progress_bar.setRange(0, total)
+        if self.progress_bar.maximum() != total:
+            self.progress_bar.setRange(0, total)
+            # Update operation with known total
+            self.operation_started.emit(f"Fetching card data", total)
         self.progress_bar.setValue(value)
         self.file_label.setText(f"Fetching card data: {value}/{total}")
+        self.progress_updated.emit(value)
 
     def on_import_finished(self, cards: List[Card]):
         self.all_cards = cards
@@ -375,42 +470,86 @@ class ManaBoxSorterTab(QWidget):
             for card in self.all_cards:
                 card.sorted_count = self.progress_to_load.get(card.scryfall_id, 0)
             self.progress_to_load = None
-        self.file_label.setText(f"Loaded and enriched {len(self.all_cards)} unique cards.")
+
+        unique_count = len(self.all_cards)
+        total_count = sum(card.quantity for card in self.all_cards)
+
+        self.file_label.setText(f"Loaded {unique_count:,} unique cards ({total_count:,} total)")
         self.progress_bar.setVisible(False);
         self.import_button.setEnabled(True);
         self.run_button.setEnabled(True)
         self.is_loading = False
+
+        # Emit signals
+        self.operation_finished.emit()
+        self.collection_loaded.emit()
+
         self.generate_plan()
 
     def on_import_error(self, error_message: str):
         self.is_loading = False;
-        self.file_label.setText("Import failed.");
+        self.file_label.setText("Import failed - see details below")
         self.progress_bar.setVisible(False)
         self.import_button.setEnabled(True);
         self.run_button.setEnabled(True)
-        QMessageBox.critical(self, "Import Error", error_message)
+
+        # Emit signal
+        self.operation_finished.emit()
+
+        # Show detailed error message
+        if "Could not fetch card" in error_message:
+            detailed_msg = (
+                f"Import failed due to network issues:\n\n{error_message}\n\n"
+                "Possible solutions:\n"
+                "• Check your internet connection\n"
+                "• Verify that Scryfall.com is accessible\n"
+                "• Try importing a smaller file first\n"
+                "• Wait a moment and try again (rate limiting)"
+            )
+        elif "Could not find header" in error_message:
+            detailed_msg = (
+                f"CSV format error:\n\n{error_message}\n\n"
+                "Please ensure you're using a ManaBox CSV export with:\n"
+                "• 'Scryfall ID' column\n"
+                "• 'Quantity' column\n"
+                "• Proper CSV formatting"
+            )
+        else:
+            detailed_msg = f"Import failed:\n\n{error_message}\n\nPlease check the file format and try again."
+
+        QMessageBox.critical(self, "Import Error", detailed_msg)
 
     def add_criterion(self):
-        if item := self.available_list.currentItem(): self.selected_list.addItem(
-            self.available_list.takeItem(self.available_list.row(item)))
+        if item := self.available_list.currentItem():
+            self.selected_list.addItem(self.available_list.takeItem(self.available_list.row(item)))
 
     def remove_criterion(self):
-        if item := self.selected_list.currentItem(): self.available_list.addItem(
-            self.selected_list.takeItem(self.selected_list.row(item)))
+        if item := self.selected_list.currentItem():
+            self.available_list.addItem(self.selected_list.takeItem(self.selected_list.row(item)))
 
     def move_up(self):
-        if (row := self.selected_list.currentRow()) > 0: item = self.selected_list.takeItem(
-            row); self.selected_list.insertItem(row - 1, item); self.selected_list.setCurrentRow(row - 1)
+        if (row := self.selected_list.currentRow()) > 0:
+            item = self.selected_list.takeItem(row);
+            self.selected_list.insertItem(row - 1, item);
+            self.selected_list.setCurrentRow(row - 1)
 
     def move_down(self):
-        if (
-        row := self.selected_list.currentRow()) < self.selected_list.count() - 1: item = self.selected_list.takeItem(
-            row); self.selected_list.insertItem(row + 1, item); self.selected_list.setCurrentRow(row + 1)
+        if (row := self.selected_list.currentRow()) < self.selected_list.count() - 1:
+            item = self.selected_list.takeItem(row);
+            self.selected_list.insertItem(row + 1, item);
+            self.selected_list.setCurrentRow(row + 1)
 
     def generate_plan(self):
-        if self.is_loading: return
+        if self.is_loading:
+            return
         if not self.all_cards:
-            if not self.last_csv_path: QMessageBox.warning(self, "No Data", "Please import a collection first.")
+            if not self.last_csv_path:
+                QMessageBox.information(
+                    self,
+                    "No Collection",
+                    "Please import a collection first using the 'Import ManaBox CSV' button.\n\n"
+                    "You can export your collection from ManaBox and import it here."
+                )
             return
 
         cards_to_process = self.all_cards
@@ -425,8 +564,9 @@ class ManaBoxSorterTab(QWidget):
         self.reset_preview_pane()
 
         if not cards_to_process:
-            self.show_status_message("Sorting Complete!", 5000)
-            for w in [self.export_button, self.mark_sorted_button, self.filter_edit]: w.setVisible(False)
+            self.show_status_message("🎉 Sorting Complete! All cards have been sorted.", 5000)
+            for w in [self.export_button, self.mark_sorted_button, self.filter_edit]:
+                w.setVisible(False)
             return
 
         self.add_breadcrumb("Home", 0)
@@ -440,10 +580,11 @@ class ManaBoxSorterTab(QWidget):
         tree.setHeaderLabels(['Group', 'Unsorted Count'])
         tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         tree.setSortingEnabled(True)
+        tree.setToolTip("Double-click to drill down, Enter to drill down, Backspace to go up, Space to mark as sorted")
         tree.itemDoubleClicked.connect(lambda item: self.handle_item_double_click(item, level + 1))
         tree.navigateUpRequested.connect(lambda: self.navigate_to_level(level - 1) if level > 0 else None)
         tree.currentItemChanged.connect(self.update_button_visibility)
-        tree.currentItemChanged.connect(self.reset_preview_pane)
+        tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.sort_order = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
         criterion = self.sort_order[level] if level < len(self.sort_order) else None
         nodes = self._generate_level_breakdown(cards_in_group, criterion)
@@ -452,12 +593,25 @@ class ManaBoxSorterTab(QWidget):
         self.results_stack.addWidget(tree)
         self.results_stack.setCurrentWidget(tree)
 
+    def on_tree_selection_changed(self, current, previous):
+        """Handle tree selection change for card preview"""
+        if current:
+            self.update_card_preview(current)
+        else:
+            self.reset_preview_pane()
+
     def on_sort_set_clicked(self):
         current_tree = self.results_stack.currentWidget()
-        if not isinstance(current_tree, NavigableTreeWidget): return
+        if not isinstance(current_tree, NavigableTreeWidget):
+            return
         current_item = current_tree.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "No Selection", "Please select a set to sort.")
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Please select a set from the list to open the detailed sorting view.\n\n"
+                "The sorting view will help you organize cards within that set more efficiently."
+            )
             return
         cards_in_set = self._get_cards_from_item(current_item)
         level = self.results_stack.currentIndex()
@@ -475,17 +629,21 @@ class ManaBoxSorterTab(QWidget):
         self.drill_down(item, next_level)
 
     def drill_down(self, item: QTreeWidgetItem, next_level: int):
-        if next_level > len(self.sort_order): return
+        if next_level > len(self.sort_order):
+            return
         cards_in_group = self._get_cards_from_item(item)
-        if not cards_in_group: return
+        if not cards_in_group:
+            return
         self.navigate_to_level(next_level - 1)
         self.add_breadcrumb(item.text(0), next_level)
         self.create_new_view(cards_in_group, next_level)
 
     def add_breadcrumb(self, text: str, level: int):
-        if level > 0: self.breadcrumb_layout.addWidget(QLabel(">"))
+        if level > 0:
+            self.breadcrumb_layout.addWidget(QLabel(">"))
         btn = QPushButton(text.split(': ')[-1])
         btn.setObjectName("BreadcrumbButton")
+        btn.setToolTip(f"Navigate back to {text}")
         btn.clicked.connect(lambda: self.navigate_to_level(level))
         self.breadcrumb_layout.addWidget(btn)
 
@@ -495,8 +653,8 @@ class ManaBoxSorterTab(QWidget):
             self.results_stack.removeWidget(widget);
             widget.deleteLater()
         while self.breadcrumb_layout.count() > (level * 2) + 1:
-            if widget := self.breadcrumb_layout.takeAt(
-                self.breadcrumb_layout.count() - 1).widget(): widget.deleteLater()
+            if widget := self.breadcrumb_layout.takeAt(self.breadcrumb_layout.count() - 1).widget():
+                widget.deleteLater()
         self.results_stack.setCurrentIndex(level);
         self.filter_edit.clear();
         self.filter_current_view("");
@@ -508,7 +666,8 @@ class ManaBoxSorterTab(QWidget):
                      c in current_cards]
             return sorted(nodes, key=lambda sg: sg.group_name)
         groups = collections.defaultdict(list)
-        for card in current_cards: groups[self._get_nested_value(card, criterion)].append(card)
+        for card in current_cards:
+            groups[self._get_nested_value(card, criterion)].append(card)
         nodes = [
             SortGroup(group_name=f"{criterion}: {name}", count=sum(c.quantity - c.sorted_count for c in card_group),
                       cards=card_group) for name, card_group in sorted(groups.items())]
@@ -528,7 +687,8 @@ class ManaBoxSorterTab(QWidget):
             if node.is_card_leaf:
                 font = tree_item.font(0);
                 font.setItalic(True)
-                for i in range(2): tree_item.setFont(i, font)
+                for i in range(2):
+                    tree_item.setFont(i, font)
 
     def _get_nested_value(self, card: Card, key: str) -> str:
         if key == "Name": return card.name
@@ -542,7 +702,8 @@ class ManaBoxSorterTab(QWidget):
 
     def clear_layout(self, layout: QHBoxLayout):
         while layout.count():
-            if child := layout.takeAt(0).widget(): child.deleteLater()
+            if child := layout.takeAt(0).widget():
+                child.deleteLater()
 
     def reset_preview_pane(self, *args):
         self.current_loading_id = None
@@ -553,20 +714,25 @@ class ManaBoxSorterTab(QWidget):
     def update_card_preview(self, item: QTreeWidgetItem):
         self.reset_preview_pane()
         cards = self._get_cards_from_item(item)
-        if not cards or len(cards) != 1: return
+        if not cards or len(cards) != 1:
+            return
         card = cards[0]
-        if not isinstance(card, Card) or not card.image_uri: return
+        if not isinstance(card, Card) or not card.image_uri:
+            return
         self.current_loading_id = card.scryfall_id
         self.card_image_label.setText("Loading image...")
         self.card_details_label.setText(
-            f"<b>{card.name}</b><br>{card.mana_cost or ''}<br>{card.type_line}<br><i>{card.set_name} ({card.rarity.upper()})</i><br><br>Total Owned: {card.quantity}<br>Sorted: {card.sorted_count}")
+            f"<b>{card.name}</b><br>{card.mana_cost or ''}<br>{card.type_line}<br>"
+            f"<i>{card.set_name} ({card.rarity.upper()})</i><br><br>"
+            f"Total Owned: {card.quantity}<br>Sorted: {card.sorted_count}")
         self.image_worker = ImageFetchWorker(card.image_uri, card.scryfall_id, self.api)
         self.image_worker.finished.connect(self.on_image_loaded)
-        self.image_worker.error.connect(lambda err: self.card_image_label.setText(f"Error:\n{err}"))
+        self.image_worker.error.connect(lambda err: self.card_image_label.setText(f"Image unavailable:\n{err}"))
         self.image_worker.start()
 
     def on_image_loaded(self, image_data: bytes, scryfall_id: str):
-        if scryfall_id != self.current_loading_id: return
+        if scryfall_id != self.current_loading_id:
+            return
         pixmap = QPixmap();
         pixmap.loadFromData(image_data)
         self.card_image_label.setPixmap(pixmap.scaled(self.card_image_label.size(), Qt.AspectRatioMode.KeepAspectRatio,
@@ -575,10 +741,21 @@ class ManaBoxSorterTab(QWidget):
     def export_current_view(self):
         current_tree = self.results_stack.currentWidget()
         if not isinstance(current_tree, QTreeWidget) or current_tree.topLevelItemCount() == 0:
-            QMessageBox.warning(self, "Export Error", "No data to export in the current view.")
+            QMessageBox.information(
+                self,
+                "No Data",
+                "There's no data to export in the current view.\n\n"
+                "Generate a sorting plan first, then navigate to the view you want to export."
+            )
             return
-        filepath, _ = QFileDialog.askSaveAsFileName(self, "Save View as CSV", "sorter_view.csv", "CSV Files (*.csv)")
-        if not filepath: return
+        filepath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save View as CSV",
+            "sorter_view.csv",
+            "CSV Files (*.csv);;All Files (*.*)"
+        )
+        if not filepath:
+            return
         try:
             with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -586,15 +763,24 @@ class ManaBoxSorterTab(QWidget):
                 iterator = QTreeWidgetItemIterator(current_tree)
                 while iterator.value():
                     item = iterator.value()
-                    if not item.isHidden(): writer.writerow([item.text(i) for i in range(current_tree.columnCount())])
+                    if not item.isHidden():
+                        writer.writerow([item.text(i) for i in range(current_tree.columnCount())])
                     iterator += 1
-            QMessageBox.information(self, "Export Success", f"Successfully exported current view to {filepath}")
-        except IOError as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to write to file: {e}")
+            QMessageBox.information(self, "Export Success", f"Successfully exported current view to:\n{filepath}")
+        except PermissionError:
+            QMessageBox.critical(
+                self,
+                "Permission Error",
+                f"Cannot write to '{filepath}'.\n\n"
+                "The file may be open in another program or you may not have write permissions."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export file:\n\n{str(e)}")
 
     def filter_current_view(self, text: str):
         current_tree = self.results_stack.currentWidget()
-        if not isinstance(current_tree, QTreeWidget): return
+        if not isinstance(current_tree, QTreeWidget):
+            return
         iterator = QTreeWidgetItemIterator(current_tree, QTreeWidgetItemIterator.IteratorFlag.All)
         while iterator.value():
             item = iterator.value()
@@ -602,7 +788,8 @@ class ManaBoxSorterTab(QWidget):
             iterator += 1
 
     def _get_cards_from_item(self, item: QTreeWidgetItem) -> List[Card]:
-        if not item: return []
+        if not item:
+            return []
         item_data = item.data(0, Qt.ItemDataRole.UserRole)
         if item_data and isinstance(item_data, list) and all(isinstance(c, Card) for c in item_data):
             return item_data
@@ -610,24 +797,59 @@ class ManaBoxSorterTab(QWidget):
 
     def on_mark_group_button_clicked(self):
         current_tree = self.results_stack.currentWidget()
-        if not isinstance(current_tree, QTreeWidget): return
+        if not isinstance(current_tree, QTreeWidget):
+            return
         selected_items = current_tree.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "No Selection", "Please select one or more groups to mark as sorted.")
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Please select one or more groups to mark as sorted.\n\n"
+                "You can select multiple groups by holding Ctrl while clicking."
+            )
             return
+
+        # Count cards that will be affected
+        total_cards_affected = 0
         for item in selected_items:
-            self.mark_item_as_sorted(item, should_regenerate=False)
-        self.show_status_message(f"Marked {len(selected_items)} groups as sorted.")
-        self.generate_plan()
+            cards_to_mark = self._get_cards_from_item(item)
+            for card in cards_to_mark:
+                total_cards_affected += max(0, card.quantity - card.sorted_count)
+
+        if total_cards_affected == 0:
+            QMessageBox.information(
+                self,
+                "Already Sorted",
+                "All selected groups are already completely sorted."
+            )
+            return
+
+        # Confirm action
+        reply = QMessageBox.question(
+            self,
+            "Confirm Mark as Sorted",
+            f"This will mark {total_cards_affected} cards in {len(selected_items)} group(s) as sorted.\n\n"
+            "Are you sure you want to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            for item in selected_items:
+                self.mark_item_as_sorted(item, should_regenerate=False)
+            self.show_status_message(f"✓ Marked {len(selected_items)} groups as sorted ({total_cards_affected} cards)")
+            self.generate_plan()
 
     def mark_item_as_sorted(self, item: QTreeWidgetItem, should_regenerate: bool = True):
         cards_to_mark = self._get_cards_from_item(item)
         if not cards_to_mark:
-            if should_regenerate: self.show_status_message("Could not find cards associated with this group.")
+            if should_regenerate:
+                self.show_status_message("⚠ Could not find cards associated with this group.")
             return
-        for card in cards_to_mark: card.sorted_count = card.quantity
+        for card in cards_to_mark:
+            card.sorted_count = card.quantity
         if should_regenerate:
-            self.show_status_message(f"Group '{item.text(0)}' sorted.")
+            self.show_status_message(f"✓ Group '{item.text(0)}' marked as sorted.")
             self.generate_plan()
 
     def update_button_visibility(self, *args):
@@ -635,12 +857,37 @@ class ManaBoxSorterTab(QWidget):
         self.mark_sorted_button.setVisible(is_normal_view)
         self.export_button.setVisible(is_normal_view)
         self.sort_set_button.setVisible(False)
-        if not is_normal_view: return
+        if not is_normal_view:
+            return
         level = self.results_stack.currentIndex()
         if level == 0 and self.sort_order and self.sort_order[0] == "Set":
             current_tree = self.results_stack.currentWidget()
-            if current_tree and current_tree.currentItem(): self.sort_set_button.setVisible(True)
+            if current_tree and current_tree.currentItem():
+                self.sort_set_button.setVisible(True)
 
     def show_status_message(self, message: str, timeout: int = 2500):
         self.status_label.setText(message)
         QTimer.singleShot(timeout, lambda: self.status_label.setText(""))
+
+    # Keyboard shortcut handlers
+    def handle_enter_key(self):
+        """Handle Enter key - drill down if possible"""
+        current_tree = self.results_stack.currentWidget()
+        if isinstance(current_tree, NavigableTreeWidget) and current_tree.currentItem():
+            level = self.results_stack.currentIndex()
+            self.drill_down(current_tree.currentItem(), level + 1)
+
+    def handle_escape_key(self):
+        """Handle Escape key - clear filter or selection"""
+        if self.filter_edit.text():
+            self.filter_edit.clear()
+        else:
+            current_tree = self.results_stack.currentWidget()
+            if isinstance(current_tree, QTreeWidget):
+                current_tree.clearSelection()
+
+    def handle_backspace_key(self):
+        """Handle Backspace key - navigate up"""
+        level = self.results_stack.currentIndex()
+        if level > 0:
+            self.navigate_to_level(level - 1)
