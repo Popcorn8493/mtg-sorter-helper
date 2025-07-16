@@ -1,3 +1,5 @@
+# core/constants.py
+
 import pathlib
 
 
@@ -16,6 +18,8 @@ class Config:
     MAX_CACHE_SIZE_MB = 500
     MAX_IMAGE_CACHE_SIZE_MB = 200
     AUTO_SAVE_INTERVAL = 300000  # 5 minutes in milliseconds
+    PROJECT_EXTENSION = "mtgproj"
+    MAX_RECENT_PROJECTS = 5
 
     # Theme settings
     DEFAULT_THEME = "dark"  # "dark" or "light"

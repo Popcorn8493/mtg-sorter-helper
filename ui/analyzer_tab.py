@@ -1,21 +1,17 @@
-import csv
-from typing import TYPE_CHECKING
+# ui/analyzer_tab.py
 
-from PyQt6.QtCore import pyqtSignal
+import csv
+
+from PyQt6.QtCore import pyqtSignal, QThread
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QLineEdit, QComboBox, QCheckBox,
     QGroupBox, QFileDialog, QMessageBox, QProgressBar, QTextEdit
 )
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
 
 from api.scryfall_api import ScryfallAPI
-from workers.threads import SetAnalysisWorker
-
-if TYPE_CHECKING:
-    from ui.sorter_tab import ManaBoxSorterTab
+from workers.threads import SetAnalysisWorker, cleanup_worker_thread
+from ui.sorter_tab import ManaBoxSorterTab
 
 
 class SetAnalyzerTab(QWidget):
@@ -31,13 +27,18 @@ class SetAnalyzerTab(QWidget):
     operation_finished = pyqtSignal()
     progress_updated = pyqtSignal(int)
 
-    def __init__(self, api: ScryfallAPI, sorter_tab: 'ManaBoxSorterTab'):
+    def __init__(self, api: ScryfallAPI, sorter_tab: "ManaBoxSorterTab"):
         super().__init__()
         self.api = api
         self.sorter_tab = sorter_tab  # Keep a reference to the sorter tab
-        self.worker = None
+        self.analysis_thread = None
+        self.analysis_worker = None
         self.last_analysis_data = None
         self.options = {}  # Initialize options attribute
+
+        # Defer chart creation to avoid startup conflicts
+        self.canvas = None
+        self.ax = None
 
         main_layout = QHBoxLayout(self)
 
@@ -48,11 +49,10 @@ class SetAnalyzerTab(QWidget):
 
         # Right panel - results
         chart_group = QGroupBox("Analysis Results")
-        chart_layout = QVBoxLayout(chart_group)
+        self.chart_layout = QVBoxLayout(chart_group)
         main_layout.addWidget(chart_group, 2)
 
         self._create_controls(controls_layout)
-        self._create_chart_area(chart_layout)
 
     def _create_controls(self, layout):
         """Create the control panel with improved tooltips and validation"""
@@ -186,6 +186,16 @@ class SetAnalyzerTab(QWidget):
 
     def _create_chart_area(self, layout):
         """Create the chart display area"""
+        # If already created, do nothing.
+        if self.canvas:
+            return
+        # Import matplotlib components just-in-time to avoid startup conflicts
+        import matplotlib
+        matplotlib.use('QtAgg')  # Explicitly use modern backend for PyQt6
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+        from matplotlib.figure import Figure
+
         # Create matplotlib figure with dark theme
         self.canvas = FigureCanvas(Figure(facecolor='#2b2b2b'))
         self.ax = self.canvas.figure.subplots()
@@ -204,6 +214,9 @@ class SetAnalyzerTab(QWidget):
 
     def run_analysis(self):
         """Start the analysis with improved validation and error handling"""
+        # Lazily create the chart widgets right before the first analysis
+        self._create_chart_area(self.chart_layout)
+
         # Validate inputs
         set_code = self.set_code_edit.text().strip().lower()
         if not set_code:
@@ -287,7 +300,7 @@ class SetAnalyzerTab(QWidget):
                 self,
                 "Save Analysis CSV",
                 f"{set_code}_analysis.csv",
-                "CSV Files (*.csv)All Files (*.*)"
+                "CSV Files (*.csv);All Files (*.*)"
             )
             if not filepath:
                 return
@@ -312,12 +325,23 @@ class SetAnalyzerTab(QWidget):
         self.operation_started.emit(f"Analyzing set {set_code}", 0)
 
         # Create and start worker
-        self.worker = SetAnalysisWorker(self.options, self.api)
-        self.worker.finished.connect(self.on_analysis_finished)
-        self.worker.error.connect(self.on_analysis_error)
-        self.worker.progress.connect(self.on_analysis_progress)
-        self.worker.status_update.connect(self.on_status_update)
-        self.worker.start()
+        self.analysis_thread = QThread()
+        self.analysis_worker = SetAnalysisWorker(self.options, self.api)
+        self.analysis_worker.moveToThread(self.analysis_thread)
+
+        # Connect signals
+        self.analysis_thread.started.connect(self.analysis_worker.process)
+        self.analysis_worker.finished.connect(self.on_analysis_finished)
+        self.analysis_worker.error.connect(self.on_analysis_error)
+        self.analysis_worker.progress.connect(self.on_analysis_progress)
+        self.analysis_worker.status_update.connect(self.on_status_update)
+
+        # Cleanup
+        self.analysis_worker.finished.connect(self.analysis_thread.quit)
+        self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
+        self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
+
+        self.analysis_thread.start()
 
     def on_analysis_progress(self, current: int, total: int):
         """Handle progress updates from worker"""
@@ -332,9 +356,8 @@ class SetAnalyzerTab(QWidget):
 
     def cancel_analysis(self):
         """Cancel the current analysis"""
-        if self.worker and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(3000)  # Wait up to 3 seconds
+        if self.analysis_thread and self.analysis_thread.isRunning():
+            cleanup_worker_thread(self.analysis_thread, self.analysis_worker)
 
         self._reset_ui_state()
         self.status_label.setText("Analysis cancelled.")
@@ -373,7 +396,7 @@ class SetAnalyzerTab(QWidget):
         self.redraw_chart()
 
         # Handle export
-        if export_path := self.worker.options.get('export_path'):
+        if export_path := self.analysis_worker.options.get('export_path'):
             self._export_results(export_path, result)
 
         self.operation_finished.emit()
@@ -442,6 +465,10 @@ class SetAnalyzerTab(QWidget):
     def redraw_chart(self):
         """Redraw the analysis chart with current options"""
         if self.last_analysis_data is None:
+            return
+
+        # This is a safeguard; chart should exist if we have data, but check anyway.
+        if not self.ax:
             return
 
         self.ax.clear()

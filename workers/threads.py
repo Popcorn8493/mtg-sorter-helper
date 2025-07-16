@@ -1,485 +1,376 @@
-import collections
-import csv
-import string
-from typing import Dict, List
+# workers/threads.py
 
-from PyQt6.QtCore import QThread, pyqtSignal
+import csv
+from typing import List, Dict, Any
+
+from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
 from api.scryfall_api import ScryfallAPI, MTGAPIError
 from core.models import Card
 
 
-class CsvImportWorker(QThread):
-    progress = pyqtSignal(int, int)
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-    status_update = pyqtSignal(str)  # New signal for status updates
+class CsvImportWorker(QObject):
+    """FIXED: Worker object for CSV import operations (moved to QObject from QThread)"""
 
-    def __init__(self, filepath: str, api: ScryfallAPI):
-        super().__init__()
-        self.filepath = filepath
+    # Signals
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal(list)  # cards
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, csv_path: str, api: ScryfallAPI, parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
         self.api = api
         self._is_cancelled = False
 
     def cancel(self):
-        """Allow cancellation of import process"""
+        """Cancel the import operation"""
         self._is_cancelled = True
 
-    def run(self):
+    def process(self):
+        """Main processing function - runs in worker thread"""
         try:
-            self.status_update.emit("Reading CSV file...")
-            cards = []
+            # Read and parse CSV
+            cards_data = []
 
-            with open(self.filepath, 'r', encoding='utf-8') as f:
-                # Find header line within first 20 lines
-                header = None
-                original_position = f.tell()
+            with open(self.csv_path, 'r', encoding='utf-8', newline='') as file:
+                reader = csv.DictReader(file)
 
-                for line_num in range(20):
-                    line = f.readline()
-                    if not line:  # End of file
-                        break
-                    if 'Scryfall ID' in line and 'Quantity' in line:
-                        header = [h.strip().strip('"') for h in line.split(',')]
-                        break
+                # Convert to list to get total count
+                rows = list(reader)
+                total_rows = len(rows)
 
-                if not header:
-                    self.error.emit(
-                        "Could not find required columns in CSV file.\n\n"
-                        "Expected columns:\n"
-                        "• 'Scryfall ID' - unique identifier for each card\n"
-                        "• 'Quantity' - number of copies owned\n\n"
-                        "Please ensure you're using a ManaBox CSV export."
-                    )
+                if total_rows == 0:
+                    self.error.emit("CSV file appears to be empty or has no valid data.")
                     return
 
-                # Find required column indices
-                try:
-                    scryfall_id_index = header.index('Scryfall ID')
-                    quantity_index = header.index('Quantity')
-                except ValueError:
-                    missing_cols = []
-                    if 'Scryfall ID' not in header:
-                        missing_cols.append('Scryfall ID')
-                    if 'Quantity' not in header:
-                        missing_cols.append('Quantity')
+                # Extract unique Scryfall IDs
+                scryfall_ids = set()
+                card_quantities = {}
 
-                    self.error.emit(
-                        f"Missing required columns: {', '.join(missing_cols)}\n\n"
-                        f"Found columns: {', '.join(header)}\n\n"
-                        "Please check your CSV file format."
-                    )
-                    return
-
-                # Optional columns
-                condition_index = header.index('Condition') if 'Condition' in header else None
-
-                # Read from beginning and skip to data
-                f.seek(0)
-                content = f.read()
-                csv_start = content.find(','.join(header))
-                if csv_start == -1:
-                    self.error.emit("Could not locate data section in CSV file.")
-                    return
-
-                csv_content = content[csv_start:]
-                reader = csv.DictReader(csv_content.splitlines(), fieldnames=header)
-                next(reader)  # Skip header row
-
-                # Convert to list to get count
-                card_list = []
-                for row in reader:
+                for row in rows:
                     if self._is_cancelled:
                         return
 
-                    # Skip empty rows
                     scryfall_id = row.get('Scryfall ID', '').strip()
                     if not scryfall_id:
                         continue
 
                     try:
-                        quantity = int(row.get('Quantity', 0))
+                        quantity = int(row.get('Quantity', 1))
                         if quantity <= 0:
-                            continue  # Skip cards with 0 quantity
-                    except ValueError:
-                        continue  # Skip rows with invalid quantity
+                            continue
+                    except (ValueError, TypeError):
+                        quantity = 1
 
-                    card_list.append(row)
+                    scryfall_ids.add(scryfall_id)
+                    card_quantities[scryfall_id] = card_quantities.get(scryfall_id, 0) + quantity
 
-                total = len(card_list)
-                if total == 0:
-                    self.error.emit(
-                        "No valid card data found in CSV file.\n\n"
-                        "Please check that:\n"
-                        "• Cards have valid Scryfall IDs\n"
-                        "• Quantities are greater than 0\n"
-                        "• The file is properly formatted"
-                    )
+                unique_ids = list(scryfall_ids)
+                if not unique_ids:
+                    self.error.emit("No valid Scryfall IDs found in CSV file.")
                     return
 
-                self.status_update.emit(f"Processing {total} cards...")
+                # Fetch card data using collection endpoint for efficiency
+                self.progress.emit(0, len(unique_ids))
 
-                # Process cards and fetch data
-                failed_cards = []
-                for i, row in enumerate(card_list):
-                    if self._is_cancelled:
+                try:
+                    # Prepare identifiers for collection endpoint
+                    identifiers = [{"id": card_id} for card_id in unique_ids]
+
+                    # Use batch fetching for efficiency
+                    fetched_cards = self.api.fetch_card_collection(identifiers)
+
+                    # Process fetched cards
+                    cards = []
+                    fetched_by_id = {card['id']: card for card in fetched_cards}
+
+                    for i, scryfall_id in enumerate(unique_ids):
+                        if self._is_cancelled:
+                            return
+
+                        if scryfall_id in fetched_by_id:
+                            card_data = fetched_by_id[scryfall_id]
+                            card = Card.from_scryfall_dict(card_data)
+                            card.quantity = card_quantities[scryfall_id]
+                            cards.append(card)
+
+                        # Update progress
+                        self.progress.emit(i + 1, len(unique_ids))
+
+                    if not cards:
+                        self.error.emit("No valid cards could be loaded from the CSV file.")
                         return
 
-                    self.progress.emit(i + 1, total)
+                    self.finished.emit(cards)
 
-                    scryfall_id = row.get('Scryfall ID', '').strip()
-
-                    try:
-                        card_data = self.api.fetch_card_by_id(scryfall_id)
-                        card = Card.from_scryfall_dict(card_data)
-
-                        # Set additional properties from CSV
-                        card.quantity = int(row.get('Quantity', 1))
-                        card.condition = row.get('Condition', 'N/A') if condition_index else 'N/A'
-
-                        cards.append(card)
-
-                    except MTGAPIError as e:
-                        failed_cards.append({
-                            'id': scryfall_id,
-                            'error': str(e),
-                            'type': e.error_type
-                        })
-
-                        # Continue processing other cards unless it's a critical error
-                        if e.error_type in ['rate_limit', 'connection_error']:
-                            # For rate limits or connection issues, fail the entire import
-                            error_msg = f"Import failed due to {e.error_type}:\n\n{str(e)}"
-                            if e.error_type == 'rate_limit':
-                                retry_after = e.details.get('retry_after', '60')
-                                error_msg += f"\n\nPlease wait {retry_after} seconds and try again."
-                            self.error.emit(error_msg)
-                            return
-                        # For individual card errors, continue but track them
-                        continue
-
-                    except Exception as e:
-                        failed_cards.append({
-                            'id': scryfall_id,
-                            'error': str(e),
-                            'type': 'unknown'
-                        })
-                        continue
-
-                # Report results
-                if not cards and failed_cards:
-                    # All cards failed
-                    error_summary = self._create_error_summary(failed_cards)
-                    self.error.emit(f"All cards failed to import:\n\n{error_summary}")
-                    return
-                elif failed_cards:
-                    # Some cards failed - emit warning but continue
-                    self.status_update.emit(f"Import completed with {len(failed_cards)} warnings")
-                else:
-                    self.status_update.emit("Import completed successfully!")
-
-                self.finished.emit(cards)
+                except MTGAPIError as e:
+                    self.error.emit(f"API Error: {e}")
+                except Exception as e:
+                    self.error.emit(f"Error fetching card data: {str(e)}")
 
         except FileNotFoundError:
-            self.error.emit(
-                f"File not found: {self.filepath}\n\n"
-                "Please check that the file exists and try again."
-            )
+            self.error.emit(f"CSV file not found: {self.csv_path}")
         except PermissionError:
-            self.error.emit(
-                f"Permission denied accessing: {self.filepath}\n\n"
-                "Please check file permissions and ensure the file is not open in another program."
-            )
+            self.error.emit(f"Permission denied reading file: {self.csv_path}")
         except UnicodeDecodeError:
-            self.error.emit(
-                "Unable to read the CSV file - invalid character encoding.\n\n"
-                "Please ensure the file is saved as UTF-8 or try opening it in a text editor and re-saving."
-            )
+            self.error.emit("CSV file encoding error. Please ensure the file is saved as UTF-8.")
+        except csv.Error as e:
+            self.error.emit(f"CSV parsing error: {str(e)}")
         except Exception as e:
-            self.error.emit(
-                f"An unexpected error occurred during import:\n\n{str(e)}\n\n"
-                "Please check the file format and try again."
-            )
-
-    def _create_error_summary(self, failed_cards: List[Dict]) -> str:
-        """Create a user-friendly summary of failed cards"""
-        if not failed_cards:
-            return ""
-
-        # Group errors by type
-        error_groups = collections.defaultdict(list)
-        for card in failed_cards:
-            error_groups[card['type']].append(card)
-
-        summary_parts = []
-
-        for error_type, cards in error_groups.items():
-            count = len(cards)
-            if error_type == 'not_found':
-                summary_parts.append(f"• {count} card(s) not found on Scryfall (invalid IDs)")
-            elif error_type == 'network_error':
-                summary_parts.append(f"• {count} card(s) failed due to network issues")
-            elif error_type == 'validation_error':
-                summary_parts.append(f"• {count} card(s) had invalid data format")
-            else:
-                summary_parts.append(f"• {count} card(s) failed with unknown errors")
-
-        summary = '\n'.join(summary_parts)
-
-        if len(failed_cards) <= 5:
-            # Show individual card details for small numbers
-            summary += "\n\nFailed cards:"
-            for card in failed_cards[:5]:
-                summary += f"\n- {card['id']}: {card['error']}"
-
-        return summary
+            self.error.emit(f"Unexpected error during import: {str(e)}")
 
 
-class SetAnalysisWorker(QThread):
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
-    progress = pyqtSignal(int, int)  # New progress signal
-    status_update = pyqtSignal(str)  # New status signal
+class ImageFetchWorker(QObject):
+    """FIXED: Worker object for image fetching operations"""
 
-    def __init__(self, options: Dict, api: ScryfallAPI):
-        super().__init__()
+    # Signals
+    finished = pyqtSignal(bytes, str)  # image_data, scryfall_id
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, image_uri: str, scryfall_id: str, api: ScryfallAPI, parent=None):
+        super().__init__(parent)
+        self.image_uri = image_uri
+        self.scryfall_id = scryfall_id
+        self.api = api
+        self._is_cancelled = False
+
+    def cancel(self):
+        """Cancel the image fetch operation"""
+        self._is_cancelled = True
+
+    def process(self):
+        """Main processing function - runs in worker thread"""
+        if self._is_cancelled:
+            return
+
+        try:
+            image_data = self.api.fetch_image(self.image_uri, self.scryfall_id)
+
+            if not self._is_cancelled:
+                self.finished.emit(image_data, self.scryfall_id)
+
+        except MTGAPIError as e:
+            if not self._is_cancelled:
+                self.error.emit(f"Failed to fetch image: {e}")
+        except Exception as e:
+            if not self._is_cancelled:
+                self.error.emit(f"Unexpected error fetching image: {str(e)}")
+
+
+class SetAnalysisWorker(QObject):
+    """FIXED: Worker object for set analysis operations"""
+
+    # Signals
+    progress = pyqtSignal(int, int)  # current, total
+    status_update = pyqtSignal(str)  # status message
+    finished = pyqtSignal(dict)  # analysis result
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, options: Dict[str, Any], api: ScryfallAPI, parent=None):
+        super().__init__(parent)
         self.options = options
         self.api = api
         self._is_cancelled = False
 
     def cancel(self):
-        """Allow cancellation of analysis"""
+        """Cancel the analysis operation"""
         self._is_cancelled = True
 
-    def _get_group_map(self, raw_totals):
-        if not self.options['group']:
-            return {letter: letter for letter in string.ascii_uppercase}
-
-        thr = self.options['threshold']
-        mapping = {}
-        buf, tot = "", 0
-
-        def flush():
-            nonlocal buf, tot
-            if buf:
-                for ch in buf:
-                    mapping[ch] = buf
-                buf, tot = "", 0
-
-        letters = string.ascii_uppercase
-        for i, l in enumerate(letters):
-            if raw_totals.get(l, 0) < thr:
-                buf += l
-                tot += raw_totals.get(l, 0)
-                if tot >= thr or not (i < 25 and raw_totals.get(letters[i + 1], 0) < thr):
-                    flush()
-            else:
-                flush()
-                mapping[l] = l
-        flush()
-        return mapping
-
-    def run(self):
+    def process(self):
+        """Main processing function - runs in worker thread"""
         try:
             set_code = self.options['set_code']
-            self.status_update.emit(f"Fetching set data for '{set_code.upper()}'...")
+            self.status_update.emit(f"Fetching cards for set '{set_code.upper()}'...")
 
-            # Fetch set data with progress tracking
+            if self._is_cancelled:
+                return
+
+            # Fetch set data
             try:
-                cards_data = self.api.fetch_set(set_code)
+                set_cards = self.api.fetch_set(set_code)
             except MTGAPIError as e:
-                if e.error_type == 'not_found':
-                    self.error.emit(
-                        f"Set '{set_code.upper()}' not found on Scryfall.\n\n"
-                        "Please check the set code and try again.\n\n"
-                        "Examples of valid set codes:\n"
-                        "• mh3 (Modern Horizons 3)\n"
-                        "• ltr (Lord of the Rings)\n"
-                        "• dmu (Dominaria United)"
-                    )
-                elif e.error_type == 'rate_limit':
-                    retry_after = e.details.get('retry_after', '60')
-                    self.error.emit(
-                        f"Rate limit exceeded.\n\n"
-                        f"Please wait {retry_after} seconds and try again."
-                    )
-                elif e.error_type == 'connection_error':
-                    self.error.emit(
-                        "Unable to connect to Scryfall.\n\n"
-                        "Please check your internet connection and try again."
-                    )
-                else:
-                    self.error.emit(f"Failed to fetch set data:\n\n{str(e)}")
+                self.error.emit(str(e))
                 return
 
             if self._is_cancelled:
                 return
 
-            original_count = len(cards_data)
-            self.status_update.emit(f"Found {original_count} cards in set")
+            if not set_cards:
+                self.error.emit(f"No cards found for set '{set_code}'")
+                return
 
-            # Filter out owned cards if provided
-            owned_cards_list = self.options.get('owned_cards')
-            if owned_cards_list:
-                self.status_update.emit("Filtering out owned cards...")
-                owned_ids = {card.scryfall_id for card in owned_cards_list}
-                cards_data = [card_dict for card_dict in cards_data if card_dict.get('id') not in owned_ids]
+            self.status_update.emit(f"Analyzing {len(set_cards)} cards from set '{set_code.upper()}'...")
 
-                filtered_count = len(cards_data)
-                owned_count = original_count - filtered_count
+            # Process owned cards if requested
+            owned_cards = self.options.get('owned_cards', [])
+            owned_by_id = {}
+            if owned_cards:
+                owned_by_id = {card.scryfall_id: card for card in owned_cards}
 
-                if not cards_data:
-                    self.status_update.emit("Analysis complete - you own the entire set!")
-                    self.finished.emit({
-                        "sorted_groups": [],
-                        "set_code": set_code,
-                        "weighted": self.options['weighted'],
-                        "owned_count": owned_count,
-                        "total_count": original_count
-                    })
-                    return
-                else:
-                    self.status_update.emit(f"Analyzing {filtered_count} missing cards ({owned_count} owned)")
+            # Filter cards if subtracting owned
+            cards_to_analyze = set_cards
+            if self.options.get('owned_cards') and owned_by_id:
+                original_count = len(set_cards)
+                cards_to_analyze = [card for card in set_cards if card['id'] not in owned_by_id]
+                owned_count = original_count - len(cards_to_analyze)
+                self.status_update.emit(
+                    f"Found {owned_count} owned cards, analyzing {len(cards_to_analyze)} missing cards...")
 
             if self._is_cancelled:
                 return
 
-            # Process cards
-            self.status_update.emit("Processing card data...")
-            total_cards = len(cards_data)
+            # Perform letter analysis
+            letter_counts = {}
+            rarity_weights = self._get_rarity_weights()
 
-            cards = []
-            for i, card_dict in enumerate(cards_data):
+            total_cards = len(cards_to_analyze)
+            for i, card_data in enumerate(cards_to_analyze):
                 if self._is_cancelled:
                     return
 
-                if i % 100 == 0:  # Update progress every 100 cards
+                card_name = card_data.get('name', '')
+                if not card_name:
+                    continue
+
+                first_letter = card_name[0].upper()
+                rarity = card_data.get('rarity', 'common')
+
+                if first_letter not in letter_counts:
+                    letter_counts[first_letter] = {
+                        'total_raw': 0,
+                        'total_weighted': 0,
+                        'rarity': {'common': 0, 'uncommon': 0, 'rare': 0, 'mythic': 0}
+                    }
+
+                letter_counts[first_letter]['total_raw'] += 1
+                letter_counts[first_letter]['total_weighted'] += rarity_weights.get(rarity, 1)
+                letter_counts[first_letter]['rarity'][rarity] = letter_counts[first_letter]['rarity'].get(rarity, 0) + 1
+
+                # Update progress
+                if i % 50 == 0:
                     self.progress.emit(i, total_cards)
 
-                try:
-                    card = Card.from_scryfall_dict(card_dict)
-                    cards.append(card)
-                except Exception:
-                    # Skip malformed cards
-                    continue
-
-            self.progress.emit(total_cards, total_cards)
-
             if self._is_cancelled:
                 return
 
-            # Perform analysis
-            self.status_update.emit("Analyzing card distribution...")
-
-            detailed_breakdown = collections.defaultdict(
-                lambda: {
-                    'total_raw': 0,
-                    'total_weighted': 0,
-                    'rarity': collections.defaultdict(float)
-                }
-            )
-
-            # Get weights
-            wts = self._get_weights(cards)
-
-            # Calculate raw letter totals for grouping
-            raw_letter_totals = collections.defaultdict(float)
-            for c in cards:
-                if c.name != 'N/A':
-                    raw_letter_totals[c.name[0].upper()] += 1
-
-            # Get grouping map
-            group_map = self._get_group_map(raw_letter_totals)
-
-            # Process each card
-            for c in cards:
-                if self._is_cancelled:
-                    return
-
-                if c.name == 'N/A':
-                    continue
-
-                group_key = group_map.get(c.name[0].upper(), c.name[0].upper())
-                weight = wts.get(c.rarity, 1)
-                value_to_add = weight if self.options['weighted'] else 1
-
-                detailed_breakdown[group_key]['total_raw'] += 1
-                detailed_breakdown[group_key]['total_weighted'] += value_to_add
-                detailed_breakdown[group_key]['rarity'][c.rarity] += value_to_add
+            # Apply grouping if requested
+            if self.options.get('group', False):
+                letter_counts = self._group_low_count_letters(letter_counts)
 
             # Sort results
-            sort_key = 'total_weighted' if self.options['weighted'] else 'total_raw'
-            sorted_groups = sorted(
-                detailed_breakdown.items(),
-                key=lambda item: item[1][sort_key],
-                reverse=True
-            )
+            weighted = self.options.get('weighted', False)
+            sort_key = 'total_weighted' if weighted else 'total_raw'
+            sorted_groups = sorted(letter_counts.items(), key=lambda x: x[1][sort_key], reverse=True)
 
-            self.status_update.emit("Analysis complete!")
-
+            # Prepare result
             result = {
-                "sorted_groups": sorted_groups,
-                "set_code": set_code,
-                "weighted": self.options['weighted'],
-                "total_cards_analyzed": len(cards),
-                "original_set_size": original_count
+                'set_code': set_code,
+                'total_cards_analyzed': len(cards_to_analyze),
+                'sorted_groups': sorted_groups,
+                'weighted': weighted,
+                'preset': self.options.get('preset', 'default')
             }
 
-            if owned_cards_list:
-                result["owned_count"] = original_count - len(cards_data)
-                result["missing_count"] = len(cards_data)
+            # Add owned card info if applicable
+            if owned_by_id:
+                result['original_set_size'] = len(set_cards)
+                result['owned_count'] = len(set_cards) - len(cards_to_analyze)
+                result['missing_count'] = len(cards_to_analyze)
 
+            self.progress.emit(total_cards, total_cards)
             self.finished.emit(result)
 
         except Exception as e:
-            self.error.emit(
-                f"An unexpected error occurred during analysis:\n\n{str(e)}\n\n"
-                "Please try again or check your input parameters."
-            )
+            if not self._is_cancelled:
+                self.error.emit(f"Analysis failed: {str(e)}")
 
-    def _get_weights(self, cards):
-        preset = self.options['preset']
+    def _get_rarity_weights(self) -> Dict[str, float]:
+        """Get rarity weights based on preset"""
+        preset = self.options.get('preset', 'default')
 
-        if preset == "play_booster":
-            return {"common": 10, "uncommon": 5, "rare": 1, "mythic": 0.25}
+        weights = {
+            'default': {'mythic': 10, 'rare': 3, 'uncommon': 1, 'common': 0.25},
+            'play_booster': {'mythic': 10, 'rare': 5, 'uncommon': 1, 'common': 0.25},
+            'dynamic': {'mythic': 8, 'rare': 4, 'uncommon': 1.5, 'common': 0.5}
+        }
 
-        if preset == "dynamic":
-            rarities = ["common", "uncommon", "rare", "mythic"]
-            rarity_counts = {r: 0 for r in rarities}
-            total = sum(1 for c in cards if c.rarity in rarities)
+        return weights.get(preset, weights['default'])
 
-            if total > 0:
-                for c in cards:
-                    if c.rarity in rarities:
-                        rarity_counts[c.rarity] += 1
-                return {r: (count / total) * 100 for r, count in rarity_counts.items()}
+    def _group_low_count_letters(self, letter_counts: Dict) -> Dict:
+        """Group letters with low counts together"""
+        threshold = self.options.get('threshold', 20)
 
-        # Default weights
-        return {"common": 10, "uncommon": 3, "rare": 1, "mythic": 0.25}
+        # Separate high and low count letters
+        high_count = {}
+        low_count_letters = []
 
-
-class ImageFetchWorker(QThread):
-    finished = pyqtSignal(bytes, str)
-    error = pyqtSignal(str)
-
-    def __init__(self, image_uri: str, scryfall_id: str, api: ScryfallAPI):
-        super().__init__()
-        self.image_uri = image_uri
-        self.scryfall_id = scryfall_id
-        self.api = api
-
-    def run(self):
-        try:
-            image_data = self.api.fetch_image(self.image_uri, self.scryfall_id)
-            self.finished.emit(image_data, self.scryfall_id)
-        except MTGAPIError as e:
-            if e.error_type == 'not_found':
-                self.error.emit("Image not available")
-            elif e.error_type == 'timeout':
-                self.error.emit("Download timeout")
-            elif e.error_type == 'connection_error':
-                self.error.emit("Connection failed")
+        for letter, data in letter_counts.items():
+            if data['total_raw'] >= threshold:
+                high_count[letter] = data
             else:
-                self.error.emit(f"Download failed: {str(e)}")
-        except Exception as e:
-            self.error.emit(f"Unexpected error: {str(e)}")
+                low_count_letters.append((letter, data))
+
+        # Group low count letters
+        if low_count_letters:
+            # Sort by letter for consistent grouping
+            low_count_letters.sort(key=lambda x: x[0])
+
+            current_group = []
+            current_total = 0
+            group_number = 1
+
+            for letter, data in low_count_letters:
+                current_group.append(letter)
+                current_total += data['total_raw']
+
+                if current_total >= threshold or letter == low_count_letters[-1][0]:
+                    # Create group
+                    group_name = ''.join(sorted(current_group))
+                    if len(current_group) == 1:
+                        group_key = current_group[0]
+                    else:
+                        group_key = f"Group {group_number} ({group_name})"
+                        group_number += 1
+
+                    # Combine data
+                    combined_data = {
+                        'total_raw': sum(letter_counts[l]['total_raw'] for l in current_group),
+                        'total_weighted': sum(letter_counts[l]['total_weighted'] for l in current_group),
+                        'rarity': {'common': 0, 'uncommon': 0, 'rare': 0, 'mythic': 0}
+                    }
+
+                    for l in current_group:
+                        for rarity in combined_data['rarity']:
+                            combined_data['rarity'][rarity] += letter_counts[l]['rarity'].get(rarity, 0)
+
+                    high_count[group_key] = combined_data
+
+                    # Reset for next group
+                    current_group = []
+                    current_total = 0
+
+        return high_count
+
+def cleanup_worker_thread(thread: QThread | None, worker: QObject | None):
+    """
+    Safely clean up a worker thread and its associated worker object.
+    """
+    try:
+        # Signal the worker to stop its processing loop
+        if worker and hasattr(worker, 'cancel'):
+            worker.cancel()
+
+        # Quit the thread's event loop
+        if thread and thread.isRunning():
+            thread.quit()
+            # Wait for the thread to finish. If it doesn't, terminate it.
+            if not thread.wait(2000):  # Wait up to 2 seconds
+                print(f"Warning: Thread {thread} did not quit gracefully, terminating.")
+                thread.terminate()
+                thread.wait(1000)  # Wait 1 more second for termination
+    except RuntimeError:
+        # This can happen if the thread or worker is already deleted
+        pass
+    except Exception as e:  # Catch other potential errors during cleanup
+        print(f"Warning: Error during thread cleanup: {e}")

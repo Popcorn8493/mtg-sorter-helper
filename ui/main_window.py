@@ -1,5 +1,7 @@
-from PyQt6.QtWidgets import QMainWindow, QTabWidget
-from PyQt6.QtCore import QSettings
+from PyQt6.QtWidgets import QMainWindow, QTabWidget, QFileDialog, QMessageBox
+from pathlib import Path
+from PyQt6.QtCore import QSettings, QTimer, Qt
+from PyQt6.QtGui import QAction, QKeySequence
 
 from api.scryfall_api import ScryfallAPI
 from ui.sorter_tab import ManaBoxSorterTab
@@ -9,45 +11,224 @@ from core.constants import Config
 
 class MTGToolkitWindow(QMainWindow):
     def __init__(self):
-        super().__init__();
-        self.setWindowTitle("MTG Toolkit");
+        super().__init__()
+        self.setWindowTitle("MTG Toolkit")
         self.setGeometry(100, 100, 1280, 800)
+
+        self.current_project_path = None
+        self._is_dirty = False
+
         self.settings = QSettings(Config.ORG_NAME, Config.APP_NAME)
         self.api = ScryfallAPI()
-        tab_widget = QTabWidget();
+        tab_widget = QTabWidget()
         self.setCentralWidget(tab_widget)
 
-        # Initialize Sorter first, then pass it to the Analyzer
+        # Initialize Sorter first, as Analyzer may depend on it
         self.sorter_tab = ManaBoxSorterTab(self.api)
-        self.analyzer_tab = SetAnalyzerTab(self.api, self.sorter_tab)
-
         tab_widget.addTab(self.sorter_tab, "Collection Sorter")
+
+        self.analyzer_tab = SetAnalyzerTab(self.api, self.sorter_tab)
         tab_widget.addTab(self.analyzer_tab, "Set Analyzer")
 
+        self._create_actions()
+        self._create_menus()
+
+        # Defer startup sequence until after the event loop has started
+        QTimer.singleShot(0, self._startup_sequence)
+
+        # Setup auto-save timer to prevent progress loss on crash
+        self.auto_save_timer = QTimer(self)
+        self.auto_save_timer.timeout.connect(self.auto_save_project)
+        self.auto_save_timer.start(Config.AUTO_SAVE_INTERVAL)
+
+        # Connect sorter signals to update dirty status
+        self.sorter_tab.project_modified.connect(self.set_dirty)
+
+    def _startup_sequence(self):
+        """Runs the application startup sequence after the event loop has started."""
         self.load_settings()
-        self.sorter_tab.initial_load()  # Trigger auto-load of last session
+        self._prompt_to_load_last_project()
+
+    def set_dirty(self, dirty=True):
+        if self._is_dirty != dirty:
+            self._is_dirty = dirty
+            self._update_window_title()
+
+    def _update_window_title(self):
+        title = "MTG Toolkit"
+        if self.current_project_path:
+            title = f"{Path(self.current_project_path).name} - {title}"
+        if self._is_dirty:
+            title = f"*{title}"
+        self.setWindowTitle(title)
+
+    def _create_actions(self):
+        self.new_action = QAction("&New Project", self, shortcut=QKeySequence.StandardKey.New,
+                                  statusTip="Create a new project", triggered=self.new_project)
+        self.open_action = QAction("&Open Project...", self, shortcut=QKeySequence.StandardKey.Open,
+                                   statusTip="Open an existing project", triggered=self.open_project)
+        self.save_action = QAction("&Save Project", self, shortcut=QKeySequence.StandardKey.Save,
+                                   statusTip="Save the current project", triggered=self.save_project)
+        self.save_as_action = QAction("Save Project &As...", self, shortcut=QKeySequence.StandardKey.SaveAs,
+                                      statusTip="Save the current project under a new name", triggered=self.save_project_as)
+        self.exit_action = QAction("E&xit", self, shortcut="Ctrl+Q",
+                                   statusTip="Exit the application", triggered=self.close)
+
+    def _create_menus(self):
+        file_menu = self.menuBar().addMenu("&File")
+        file_menu.addAction(self.new_action)
+        file_menu.addAction(self.open_action)
+        self.recent_projects_menu = file_menu.addMenu("Recent Projects")
+        file_menu.addSeparator()
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
+
+    def new_project(self):
+        if not self._prompt_to_save():
+            return
+        self.sorter_tab.clear_project(prompt=False)
+        self.current_project_path = None
+        self.set_dirty(False)
+
+    def open_project(self, filepath=None):
+        if not self._prompt_to_save():
+            return
+
+        if not filepath:
+            last_dir = str(Path(self.settings.value("general/lastProjectPath", str(Path.home()))).parent)
+            filepath, _ = QFileDialog.getOpenFileName(
+                self, "Open Project", last_dir, f"MTG Sorter Projects (*.{Config.PROJECT_EXTENSION});;All Files (*)"
+            )
+
+        if not filepath:
+            return
+
+        if not Path(filepath).exists():
+            QMessageBox.warning(self, "File Not Found", f"The project file could not be found:\n{filepath}")
+            self._remove_from_recent_projects(filepath)
+            return
+
+        if self.sorter_tab.load_from_project(filepath):
+            self.current_project_path = filepath
+            self.set_dirty(False)
+            self.settings.setValue("general/lastProjectPath", filepath)
+            self._add_to_recent_projects(filepath)
+
+    def save_project(self):
+        if not self.current_project_path:
+            return self.save_project_as()
+
+        if self.sorter_tab.save_to_project(self.current_project_path):
+            self.set_dirty(False)
+            return True
+        return False
+
+    def save_project_as(self):
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Save Project As", self.current_project_path or str(Path.home() / "Untitled.mtgproj"),
+            f"MTG Sorter Projects (*.{Config.PROJECT_EXTENSION});;All Files (*)"
+        )
+        if not filepath:
+            return False
+
+        if self.sorter_tab.save_to_project(filepath):
+            self.current_project_path = filepath
+            self.set_dirty(False)
+            self.settings.setValue("general/lastProjectPath", filepath)
+            self._add_to_recent_projects(filepath)
+            return True
+        return False
+
+    def auto_save_project(self):
+        if self._is_dirty and self.current_project_path:
+            self.sorter_tab.save_to_project(self.current_project_path, is_auto_save=True)
 
     def load_settings(self):
-        self.analyzer_tab.set_code_edit.setText(self.settings.value("analyzer/lastSetCode", "", str))
-        selected_items = self.settings.value("sorter/sortCriteria", [], str)
-        if isinstance(selected_items, str): selected_items = [selected_items]  # Handle single item case
-        for item_text in selected_items: self.sorter_tab.selected_list.addItem(item_text)
+        """Loads non-project application settings."""
+        if self.analyzer_tab:
+            self.analyzer_tab.set_code_edit.setText(self.settings.value("analyzer/lastSetCode", "", str))
+        # Restore window geometry
+        self.restoreGeometry(self.settings.value("general/geometry", self.saveGeometry()))
+        self._update_recent_projects_menu()
+
+    def _prompt_to_load_last_project(self):
+        last_project_path = self.settings.value("general/lastProjectPath", None)
+        if last_project_path and Path(last_project_path).exists():
+            reply = QMessageBox.question(
+                self,
+                "Reopen Last Project?",
+                f"Would you like to open the last project you were working on?\n\n{last_project_path}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_project(filepath=last_project_path)
+
+    def _update_recent_projects_menu(self):
+        self.recent_projects_menu.clear()
+        recent_files = self.settings.value("recentProjects", [], str)
+        if not recent_files:
+            action = QAction("No Recent Projects", self)
+            action.setEnabled(False)
+            self.recent_projects_menu.addAction(action)
+            return
+
+        for i, filepath in enumerate(recent_files):
+            action = QAction(f"&{i+1} {Path(filepath).name}", self,
+                             triggered=lambda checked, p=filepath: self.open_project(filepath=p))
+            self.recent_projects_menu.addAction(action)
+
+    def _add_to_recent_projects(self, filepath: str):
+        if not filepath: return
+        recent_files = self.settings.value("recentProjects", [], str)
+        try: recent_files.remove(filepath)
+        except ValueError: pass
+        recent_files.insert(0, filepath)
+        self.settings.setValue("recentProjects", recent_files[:Config.MAX_RECENT_PROJECTS])
+        self._update_recent_projects_menu()
+
+    def _remove_from_recent_projects(self, filepath: str):
+        if not filepath: return
+        recent_files = self.settings.value("recentProjects", [], str)
+        try:
+            recent_files.remove(filepath)
+            self.settings.setValue("recentProjects", recent_files)
+            self._update_recent_projects_menu()
+        except ValueError: pass
 
     def save_settings(self):
-        # Analyzer settings
-        self.settings.setValue("analyzer/lastSetCode", self.analyzer_tab.set_code_edit.text())
+        """Saves non-project application settings."""
+        if self.analyzer_tab:
+            self.settings.setValue("analyzer/lastSetCode", self.analyzer_tab.set_code_edit.text())
+        self.settings.setValue("general/geometry", self.saveGeometry())
 
-        # Sorter settings
-        selected_items = [self.sorter_tab.selected_list.item(i).text() for i in
-                          range(self.sorter_tab.selected_list.count())]
-        self.settings.setValue("sorter/sortCriteria", selected_items)
-
-        # Save sorting progress
-        if self.sorter_tab.all_cards and self.sorter_tab.last_csv_path:
-            progress = {c.scryfall_id: c.sorted_count for c in self.sorter_tab.all_cards if c.sorted_count > 0}
-            self.settings.setValue("sorter/progress", progress)
-            self.settings.setValue("sorter/lastCsvPath", self.sorter_tab.last_csv_path)
+    def _prompt_to_save(self) -> bool:
+        if not self._is_dirty:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            "You have unsaved changes. Would you like to save them?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_project()
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        return True
 
     def closeEvent(self, event):
-        self.save_settings();
-        super().closeEvent(event)
+        if self._prompt_to_save():
+            self.auto_save_timer.stop()
+            self.save_settings()  # Save app settings like window size
+
+            # Clear the temporary data cache on exit to save disk space and ensure privacy.
+            # The project files themselves are not affected.
+            self.api.clear_cache()
+
+            event.accept()
+        else:
+            event.ignore()

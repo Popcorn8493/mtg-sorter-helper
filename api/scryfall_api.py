@@ -1,3 +1,5 @@
+# api/scryfall_api.py
+
 import json
 import os
 import pathlib
@@ -9,6 +11,7 @@ import requests
 
 from core.constants import Config
 
+SCRYFALL_API_COLLECTION_ENDPOINT = "https://api.scryfall.com/cards/collection"
 
 class CacheManager:
     """Manages cache size and cleanup operations"""
@@ -179,6 +182,53 @@ class ScryfallAPI:
                 "network_error",
                 {"original_error": str(e)}
             )
+
+    def fetch_card_collection(self, identifiers: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """
+        Fetches a collection of cards using the Scryfall API's /cards/collection endpoint.
+        This is much more efficient than fetching cards one by one.
+        """
+        if not identifiers:
+            return []
+
+        all_cards_data = []
+        not_found_ids = []
+
+        # Scryfall's collection endpoint can handle up to 75 identifiers at a time.
+        chunk_size = 75
+        for i in range(0, len(identifiers), chunk_size):
+            chunk = identifiers[i:i + chunk_size]
+            payload = {"identifiers": chunk}
+
+            try:
+                time.sleep(0.05)  # Rate limiting
+                response = self.session.post(SCRYFALL_API_COLLECTION_ENDPOINT, json=payload, timeout=60)
+                response.raise_for_status()
+
+                data = response.json()
+
+                # Add successfully found cards to our list
+                if 'data' in data and data['data']:
+                    all_cards_data.extend(data['data'])
+
+                # Keep track of cards that weren't found
+                if 'not_found' in data and data['not_found']:
+                    not_found_ids.extend([item.get('id', 'Unknown') for item in data['not_found']])
+
+            except requests.RequestException as e:
+                # In case of a network error, we can either fail the whole batch or just this chunk.
+                # For now, we'll raise an error for the whole operation.
+                raise MTGAPIError(
+                    f"Network error while fetching card collection: {e}",
+                    "network_error",
+                    {"chunk_start_index": i}
+                )
+
+        if not_found_ids:
+            # Optionally, log or handle the not_found_ids. For now, we just proceed.
+            print(f"Warning: {len(not_found_ids)} cards were not found on Scryfall.")
+
+        return all_cards_data
 
     def fetch_set(self, set_code: str) -> List[Dict[str, Any]]:
         """Fetch all cards from a set with improved error handling"""
