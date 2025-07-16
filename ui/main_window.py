@@ -50,17 +50,44 @@ class MTGToolkitWindow(QMainWindow):
         self._prompt_to_load_last_project()
 
     def set_dirty(self, dirty=True):
-        if self._is_dirty != dirty:
-            self._is_dirty = dirty
-            self._update_window_title()
+        print("DEBUG: MainWindow.set_dirty called with dirty =", dirty)
+        try:
+            if self._is_dirty != dirty:
+                print("DEBUG: Updating dirty state from", self._is_dirty, "to", dirty)
+                self._is_dirty = dirty
+                print("DEBUG: About to call _update_window_title...")
+                self._update_window_title()
+                print("DEBUG: _update_window_title completed")
+            else:
+                print("DEBUG: No dirty state change needed")
+        except Exception as e:
+            print(f"ERROR: Exception in set_dirty: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _update_window_title(self):
-        title = "MTG Toolkit"
-        if self.current_project_path:
-            title = f"{Path(self.current_project_path).name} - {title}"
-        if self._is_dirty:
-            title = f"*{title}"
-        self.setWindowTitle(title)
+        print("DEBUG: _update_window_title called")
+        try:
+            title = "MTG Toolkit"
+            print("DEBUG: Base title set")
+            
+            if self.current_project_path:
+                print(f"DEBUG: Adding project path: {self.current_project_path}")
+                title = f"{Path(self.current_project_path).name} - {title}"
+                print(f"DEBUG: Title with project: {title}")
+            
+            if self._is_dirty:
+                print("DEBUG: Adding dirty marker")
+                title = f"*{title}"
+                print(f"DEBUG: Final title: {title}")
+            
+            print("DEBUG: About to call setWindowTitle...")
+            self.setWindowTitle(title)
+            print("DEBUG: setWindowTitle completed")
+        except Exception as e:
+            print(f"ERROR: Exception in _update_window_title: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _create_actions(self):
         self.new_action = QAction("&New Project", self, shortcut=QKeySequence.StandardKey.New,

@@ -1,82 +1,92 @@
-# ui/custom_widgets.py - FIXED VERSION with stack overflow prevention
+# ui/custom_widgets.py - CORRECTED WORKING VERSION
 
-from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
-from PyQt6.QtCore import Qt, pyqtSignal as Signal, QObject, QTimer
+from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
 
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
 	"""Enhanced tree widget item with improved sorting capabilities"""
-	
+
 	def __lt__(self, other):
-		"""Custom sorting logic for tree items"""
+		"""
+		Custom sorting logic for tree items.
+
+		- Column 1 (Count): Sorts numerically, treating empty strings as smallest.
+		- Other Columns: Sorts alphabetically (case-insensitive).
+		- Special Prefixes: For text like "Set: XYZ", it sorts based on "XYZ".
+		"""
 		if not isinstance(other, QTreeWidgetItem):
-			return False
-		
+			return NotImplemented
+
 		tree = self.treeWidget()
 		column = tree.sortColumn() if tree else 0
-		
+
 		try:
 			# For the count column (usually column 1), sort numerically
 			if column == 1:
 				self_text = self.text(column)
 				other_text = other.text(column)
-				
-				# Handle empty strings
+
+				# Handle empty strings to sort them at the top
 				if not self_text:
 					return True
 				if not other_text:
 					return False
-				
+
 				self_value = int(self_text)
 				other_value = int(other_text)
 				return self_value < other_value
 		except (ValueError, IndexError):
 			# Fall back to string comparison if numeric conversion fails
 			pass
-		
+
 		# For other columns, sort alphabetically (case-insensitive)
 		self_text = self.text(column).lower()
 		other_text = other.text(column).lower()
-		
-		# Handle special prefixes (like "Set: ", "Rarity: ", etc.)
+
+		# For columns with "key: value" format, sort by value for more natural sorting.
 		if ': ' in self_text and ': ' in other_text:
-			# Extract the part after the colon for comparison
 			try:
+				# Extract the part after the colon for comparison
 				self_suffix = self_text.split(': ', 1)[1]
 				other_suffix = other_text.split(': ', 1)[1]
 				return self_suffix < other_suffix
 			except IndexError:
+				# If split fails, fall back to comparing the full text
 				pass
-		
+
 		return self_text < other_text
 
 
 class NavigableTreeWidget(QTreeWidget):
-	"""FIXED: Stack overflow prevention with recursion guards and better signal handling"""
+	"""CORRECTED: Stack overflow prevention with proper implementation"""
 	
 	# Signals for different navigation actions
-	drillDownRequested = Signal(QTreeWidgetItem)
-	navigateUpRequested = Signal()
-	markAsortedRequested = Signal(list)  # List of selected items
+	drillDownRequested = pyqtSignal(QTreeWidgetItem)
+	navigateUpRequested = pyqtSignal()
+	markAsortedRequested = pyqtSignal(list)  # List of selected items
 	
 	def __init__(self, parent=None):
 		super().__init__(parent)
 		
-		# FIXED: Add recursion guards
-		self._in_key_event = False
-		self._in_mouse_event = False
-		self._in_selection_change = False
-		self._signal_emission_blocked = False
-		
-		# Initialize all attributes and safety flags
-		self.navigation_history = []
-		self.max_history_size = 10
-		self._is_connected = True
+		# FIXED: Proper initialization of all attributes
 		self._is_destroyed = False
 		self._signals_connected = False
+		self._signals_blocked_count = 0
+		self._in_operation = False  # Simple flag to prevent recursion
 		
-		# Enable tooltips and help text
+		# Navigation history
+		self.navigation_history = []
+		self.max_history_size = 10
+		
+		# Operation timer for deferred execution
+		self._operation_timer = QTimer()
+		self._operation_timer.timeout.connect(self._process_pending_operations)
+		self._operation_timer.setSingleShot(True)
+		self._pending_operations = []
+		
+		# Enhanced tooltips
 		self.setToolTip(
 				"Keyboard Navigation:\n"
 				"• Enter/Return - Drill down into selected group\n"
@@ -90,27 +100,77 @@ class NavigableTreeWidget(QTreeWidget):
 				"• Right-click - Context menu (if available)"
 		)
 		
-		# Enable extended selection by default for multiple item operations
+		# Enable extended selection by default
 		self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
 		
-		# FIXED: Connect signals with delay and guards
+		# FIXED: Deferred signal connection
 		QTimer.singleShot(100, self._safe_connect_signals)
 	
 	def _safe_connect_signals(self):
-		"""FIXED: Safely connect signals with error handling and recursion guards"""
+		"""FIXED: Safely connect signals with error handling"""
+		if self._is_destroyed or self._signals_connected:
+			return
+		
 		try:
-			if not self._is_destroyed and not self._signals_connected:
-				self.itemSelectionChanged.connect(self._on_selection_changed)
-				self._signals_connected = True
+			self.blockSignals(True)
+			self.itemSelectionChanged.connect(self._safe_on_selection_changed)
+			self.blockSignals(False)
+			self._signals_connected = True
 		except Exception as e:
 			print(f"Warning: Failed to connect selection signal: {e}")
+			self.blockSignals(False)
+	
+	def _safe_block_signals(self):
+		"""FIXED: Safe signal blocking with reference counting"""
+		self._signals_blocked_count += 1
+		if self._signals_blocked_count == 1:
+			self.blockSignals(True)
+	
+	def _safe_unblock_signals(self):
+		"""FIXED: Safe signal unblocking with reference counting"""
+		self._signals_blocked_count = max(0, self._signals_blocked_count - 1)
+		if self._signals_blocked_count == 0:
+			self.blockSignals(False)
+	
+	def _queue_operation(self, operation_func, delay_ms=10):
+		"""Queue operations for safe deferred execution"""
+		if self._is_destroyed:
+			return
+		
+		self._pending_operations.append(operation_func)
+		if not self._operation_timer.isActive():
+			self._operation_timer.start(delay_ms)
+	
+	def _process_pending_operations(self):
+		"""Process queued operations safely"""
+		if self._is_destroyed or not self._pending_operations:
+			return
+		
+		# Process one operation at a time
+		operation = self._pending_operations.pop(0)
+		
+		try:
+			operation()
+		except Exception as e:
+			print(f"Error processing pending operation: {e}")
+		
+		# Schedule next operation if more are pending
+		if self._pending_operations and not self._is_destroyed:
+			self._operation_timer.start(10)
 	
 	def cleanup(self):
-		"""FIXED: Clean up resources and disconnect signals safely"""
+		"""FIXED: Comprehensive cleanup"""
 		if self._is_destroyed:
 			return
 		
 		self._is_destroyed = True
+		
+		# Stop any pending operations
+		if hasattr(self, '_operation_timer'):
+			self._operation_timer.stop()
+		if hasattr(self, '_pending_operations'):
+			self._pending_operations.clear()
+			
 		# Block signals to prevent any last-minute events on a widget that is being destroyed.
 		# Qt's object ownership model will handle the actual disconnection of signals
 		# when this widget is deleted by its parent or by deleteLater().
@@ -122,139 +182,138 @@ class NavigableTreeWidget(QTreeWidget):
 		super().closeEvent(event)
 	
 	def mouseDoubleClickEvent(self, event: QMouseEvent):
-		"""FIXED: Stack overflow prevention in mouse events"""
-		if self._is_destroyed or self._in_mouse_event:
+		"""FIXED: Safe mouse double click handling"""
+		if self._is_destroyed or self._in_operation:
 			return
 		
 		try:
-			self._in_mouse_event = True
+			self._in_operation = True
 			
 			if event.button() == Qt.MouseButton.RightButton:
-				self._emit_safe_signal(lambda: self.navigateUpRequested.emit())
+				self._safe_emit_signal(lambda: self.navigateUpRequested.emit())
 				event.accept()
 			else:
-				# Let the base class handle left double-clicks
 				super().mouseDoubleClickEvent(event)
 		except Exception as e:
 			print(f"Error in mouseDoubleClickEvent: {e}")
 		finally:
-			self._in_mouse_event = False
+			self._in_operation = False
 	
 	def keyPressEvent(self, event: QKeyEvent):
-		"""FIXED: Stack overflow prevention in keyboard events"""
-		if self._is_destroyed or self._in_key_event:
+		"""FIXED: Safe keyboard event handling by dispatching to specialized handlers."""
+		if self._is_destroyed or self._in_operation:
 			return
-		
+
 		try:
-			self._in_key_event = True
-			
-			key = event.key()
-			modifiers = event.modifiers()
-			
-			# Get currently selected items
-			selected_items = self.selectedItems()
-			current_item = self.currentItem()
-			
-			if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-				# Drill down into selected item
-				if current_item:
-					self._add_to_history()
-					self._emit_safe_signal(lambda: self.drillDownRequested.emit(current_item))
-					event.accept()
-					return
-			
-			elif key == Qt.Key.Key_Backspace:
-				# Navigate up one level
-				self._emit_safe_signal(lambda: self.navigateUpRequested.emit())
+			self._in_operation = True
+
+			# Sequentially try handlers. If a handler processes the key, accept the event and return.
+			if self._handle_item_action_keys(event) or \
+			   self._handle_navigation_keys(event) or \
+			   self._handle_selection_keys(event):
 				event.accept()
 				return
-			
-			elif key == Qt.Key.Key_Space:
-				# Mark selected items as sorted
-				if selected_items:
-					self._emit_safe_signal(lambda: self.markAsortedRequested.emit(selected_items))
-					event.accept()
-					return
-			
-			elif key == Qt.Key.Key_F2:
-				# Show item details
-				if current_item:
-					self._show_item_details(current_item)
-					event.accept()
-					return
-			
-			elif key == Qt.Key.Key_Escape:
-				# Clear selection
-				self.clearSelection()
-				event.accept()
-				return
-			
-			elif key == Qt.Key.Key_Home:
-				# Go to first item
-				if self.topLevelItemCount() > 0:
-					first_item = self.topLevelItem(0)
-					if first_item:
-						self.setCurrentItem(first_item)
-					event.accept()
-					return
-			
-			elif key == Qt.Key.Key_End:
-				# Go to last item
-				if self.topLevelItemCount() > 0:
-					last_item = self.topLevelItem(self.topLevelItemCount() - 1)
-					if last_item:
-						self.setCurrentItem(last_item)
-					event.accept()
-					return
-			
-			elif key == Qt.Key.Key_A and modifiers & Qt.KeyboardModifier.ControlModifier:
-				# Select all items (Ctrl+A)
-				self.selectAll()
-				event.accept()
-				return
-			
-			elif Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-				# Quick navigation by first letter
-				if not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
-					letter = chr(key).upper()
-					self._navigate_to_letter(letter)
-					event.accept()
-					return
-			
-			# If no custom handling, pass to parent
+
+			# If no custom handler processed the key, pass it to the base class.
 			super().keyPressEvent(event)
-		
+
 		except Exception as e:
 			print(f"Error in keyPressEvent: {e}")
-			# Always call parent to prevent event system issues
+			# Fallback to base class to avoid swallowing the event on error.
 			try:
 				super().keyPressEvent(event)
 			except:
 				pass
 		finally:
-			self._in_key_event = False
-	
-	def _emit_safe_signal(self, emit_func):
-		"""FIXED: Safely emit signals with recursion prevention"""
-		if self._is_destroyed or self._signal_emission_blocked:
+			self._in_operation = False
+
+	def _handle_item_action_keys(self, event: QKeyEvent) -> bool:
+		"""Handles key presses that perform actions on the current/selected item(s)."""
+		key = event.key()
+		current_item = self.currentItem()
+
+		if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+			if current_item:
+				self._add_to_history()
+				self._safe_emit_signal(lambda: self.drillDownRequested.emit(current_item))
+				return True
+		elif key == Qt.Key.Key_Space:
+			selected_items = self.selectedItems()
+			if selected_items:
+				self._safe_emit_signal(lambda: self.markAsortedRequested.emit(selected_items))
+				return True
+		elif key == Qt.Key.Key_F2:
+			if current_item:
+				self._show_item_details(current_item)
+				return True
+		return False
+
+	def _handle_navigation_keys(self, event: QKeyEvent) -> bool:
+		"""Handles key presses for navigating within the tree."""
+		key = event.key()
+		modifiers = event.modifiers()
+
+		if key == Qt.Key.Key_Backspace:
+			self._safe_emit_signal(lambda: self.navigateUpRequested.emit())
+			return True
+		elif key == Qt.Key.Key_Home:
+			if self.topLevelItemCount() > 0:
+				item = self.topLevelItem(0)
+				if item:
+					self._safe_block_signals()
+					try:
+						self.setCurrentItem(item)
+					finally:
+						self._safe_unblock_signals()
+				return True
+		elif key == Qt.Key.Key_End:
+			if self.topLevelItemCount() > 0:
+				item = self.topLevelItem(self.topLevelItemCount() - 1)
+				if item:
+					self._safe_block_signals()
+					try:
+						self.setCurrentItem(item)
+					finally:
+						self._safe_unblock_signals()
+				return True
+		elif Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
+			if not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+				letter = chr(key).upper()
+				self._navigate_to_letter(letter)
+				return True
+		return False
+
+	def _handle_selection_keys(self, event: QKeyEvent) -> bool:
+		"""Handles key presses related to item selection."""
+		key = event.key()
+		modifiers = event.modifiers()
+
+		if key == Qt.Key.Key_Escape:
+			self._safe_block_signals()
+			try:
+				self.clearSelection()
+			finally:
+				self._safe_unblock_signals()
+			return True
+		elif key == Qt.Key.Key_A and modifiers & Qt.KeyboardModifier.ControlModifier:
+			self._safe_block_signals()
+			try:
+				self.selectAll()
+			finally:
+				self._safe_unblock_signals()
+			return True
+		return False
+
+	def _safe_emit_signal(self, emit_func):
+		"""FIXED: Safely emit signals with deferred execution"""
+		if self._is_destroyed:
 			return
 		
 		try:
-			self._signal_emission_blocked = True
-			# Emit after a short delay to break recursion chains
-			QTimer.singleShot(10, lambda: self._do_emit(emit_func))
+			# Queue the signal emission for safe deferred execution
+			self._queue_operation(emit_func, 20)
 		except Exception as e:
-			print(f"Error in _emit_safe_signal: {e}")
-	
-	def _do_emit(self, emit_func):
-		"""Actually emit the signal"""
-		try:
-			if not self._is_destroyed:
-				emit_func()
-		except Exception as e:
-			print(f"Error emitting signal: {e}")
-		finally:
-			self._signal_emission_blocked = False
+			print(f"Error in _safe_emit_signal: {e}")
 	
 	def _add_to_history(self):
 		"""Add current state to navigation history"""
@@ -316,6 +375,8 @@ class NavigableTreeWidget(QTreeWidget):
 			return
 		
 		try:
+			self._safe_block_signals()
+			
 			for i in range(self.topLevelItemCount()):
 				item = self.topLevelItem(i)
 				if item:
@@ -333,15 +394,26 @@ class NavigableTreeWidget(QTreeWidget):
 						break
 		except Exception as e:
 			print(f"Error navigating to letter: {e}")
+		finally:
+			self._safe_unblock_signals()
 	
-	def _on_selection_changed(self):
-		"""FIXED: Stack overflow prevention in selection change handling"""
-		if (self._is_destroyed or not hasattr(self, '_is_connected') or
-				not self._is_connected or self._in_selection_change):
+	def _safe_on_selection_changed(self):
+		"""FIXED: Safe selection change handling"""
+		if self._is_destroyed or not self._signals_connected or self._in_operation:
 			return
 		
 		try:
-			self._in_selection_change = True
+			# Queue the actual selection handling to prevent immediate recursion
+			self._queue_operation(self._do_selection_changed, 5)
+		except Exception as e:
+			print(f"Error in _safe_on_selection_changed: {e}")
+	
+	def _do_selection_changed(self):
+		"""Handle selection change with safety measures"""
+		if self._is_destroyed:
+			return
+		
+		try:
 			selected_count = len(self.selectedItems())
 			
 			if selected_count == 0:
@@ -371,27 +443,26 @@ class NavigableTreeWidget(QTreeWidget):
 			self.setToolTip(tooltip)
 		except Exception as e:
 			print(f"Error in selection changed handler: {e}")
-		finally:
-			self._in_selection_change = False
 	
 	def mousePressEvent(self, event):
-		"""FIXED: Stack overflow prevention in mouse press events"""
-		if self._is_destroyed or self._in_mouse_event:
+		"""FIXED: Safe mouse press handling that allows itemClicked signal emission"""
+		if self._is_destroyed:
 			return
 		
 		try:
-			self._in_mouse_event = True
+			# Don't set _in_operation flag here as it blocks Qt's signal emission
+			# Call parent first to allow normal Qt event processing and signal emission
 			super().mousePressEvent(event)
 			
-			# Update tooltip based on what was clicked
+			# Update tooltip based on what was clicked (deferred to avoid interference)
 			if event.button() == Qt.MouseButton.LeftButton:
 				item = self.itemAt(event.pos())
 				if item:
-					self._show_item_details(item)
+					# Queue the details showing with longer delay to avoid interference with signals
+					self._queue_operation(lambda: self._show_item_details(item), 50)
+		
 		except Exception as e:
 			print(f"Error in mousePressEvent: {e}")
-		finally:
-			self._in_mouse_event = False
 	
 	def get_navigation_history(self):
 		"""Get the navigation history for debugging"""
@@ -408,9 +479,10 @@ class NavigableTreeWidget(QTreeWidget):
 		except:
 			self.navigation_history = []
 
-	def _populate_tree_progressively(self, nodes, parent_item=None, chunk_size=100):
-		"""FIXED: Populates the tree in chunks to prevent stack overflow"""
+	def _populate_tree_progressively(self, nodes, parent_item=None, chunk_size=100, on_finished=None):
+		"""Populates the tree in chunks to prevent stack overflow"""
 		if self._is_destroyed:
+			print("DEBUG: _populate_tree_progressively aborted - widget destroyed")
 			return
 
 		if parent_item is None:
@@ -418,53 +490,103 @@ class NavigableTreeWidget(QTreeWidget):
 
 		chunk = nodes[:chunk_size]
 		remaining_nodes = nodes[chunk_size:]
+		
+		print(f"DEBUG: Processing chunk of {len(chunk)} nodes, {len(remaining_nodes)} remaining")
 
-		for node in chunk:
-			tree_item = SortableTreeWidgetItem(parent_item, [node.group_name, str(node.count)])
-			tree_item.setData(0, Qt.ItemDataRole.UserRole, node.cards)
+		try:
+			for i, node in enumerate(chunk):
+				try:
+					tree_item = SortableTreeWidgetItem(parent_item, [node.group_name, str(node.count)])
+					tree_item.setData(0, Qt.ItemDataRole.UserRole, node.cards)
 
-			if hasattr(node, 'unsorted_count') and node.unsorted_count <= 0:
-				font = tree_item.font(0)
-				font.setStrikeOut(True)
-				tree_item.setFont(0, font)
-				tree_item.setFont(1, font)
-				tree_item.setForeground(0, QColor(Qt.GlobalColor.gray))
-				tree_item.setForeground(1, QColor(Qt.GlobalColor.gray))
+					if hasattr(node, 'unsorted_count') and node.unsorted_count <= 0:
+						font = tree_item.font(0)
+						font.setStrikeOut(True)
+						tree_item.setFont(0, font)
+						tree_item.setFont(1, font)
+						tree_item.setForeground(0, QColor(Qt.GlobalColor.gray))
+						tree_item.setForeground(1, QColor(Qt.GlobalColor.gray))
 
-			if node.is_card_leaf:
-				font = tree_item.font(0)
-				font.setItalic(True)
-				for j in range(2):
-					tree_item.setFont(j, font)
+					if getattr(node, 'is_card_leaf', False):
+						font = tree_item.font(0)
+						font.setItalic(True)
+						for j in range(2):
+							tree_item.setFont(j, font)
+				except Exception as e:
+					print(f"ERROR: Failed to process node {i}: {e}")
+					continue
+
+		except Exception as e:
+			print(f"ERROR: Failed during chunk processing: {e}")
+			import traceback
+			traceback.print_exc()
+			return
 
 		if remaining_nodes:
-			QTimer.singleShot(0, lambda: self._populate_tree_progressively(remaining_nodes, parent_item, chunk_size))
+			print(f"DEBUG: Scheduling next chunk ({len(remaining_nodes)} nodes remaining)")
+			QTimer.singleShot(0, lambda: self._populate_tree_progressively(remaining_nodes, parent_item, chunk_size, on_finished))
 		else:
-			# This is the last chunk, now we can sort.
-			self.sortByColumn(self.sortColumn(), self.header().sortIndicatorOrder())
+			# This is the last chunk, now we can sort and call the callback.
+			print("DEBUG: Final chunk completed, running final actions...")
+			def final_actions():
+				if self._is_destroyed:
+					print("DEBUG: final_actions aborted - widget destroyed")
+					return
+				try:
+					print("DEBUG: Sorting tree...")
+					self.sortByColumn(self.sortColumn(), self.header().sortIndicatorOrder())
+					print("DEBUG: Tree sorted, calling on_finished callback...")
+					if on_finished:
+						try:
+							on_finished()
+							print("DEBUG: on_finished callback completed")
+						except Exception as e:
+							print(f"ERROR: on_finished callback failed: {e}")
+							import traceback
+							traceback.print_exc()
+				except Exception as e:
+					print(f"ERROR: final_actions failed: {e}")
+					import traceback
+					traceback.print_exc()
+			
+			QTimer.singleShot(0, final_actions)
 
 class StatusAwareWidget(QObject):
-	"""FIXED: Mixin class for widgets that provide status updates"""
-	
+	"""A mixin class for widgets that provide status updates."""
+
 	def __init__(self, parent=None):
 		super().__init__(parent)
+		self._status_message = ""
+		self._status_timeout = 0
+		self._is_destroyed = False
+	
+	def cleanup(self):
+		"""Clean up status widget"""
+		self._is_destroyed = True
 		self._status_message = ""
 		self._status_timeout = 0
 	
 	def set_status_message(self, message: str, timeout: int = 0):
 		"""Set a status message that can be displayed in UI"""
+		if self._is_destroyed:
+			return
+		
 		try:
-			self._status_message = str(message)
-			self._status_timeout = max(0, int(timeout))
-		except:
+			self._status_message = str(message) if message is not None else ""
+			self._status_timeout = max(0, int(timeout)) if timeout is not None else 0
+		except Exception as e:
+			print(f"Error setting status message: {e}")
 			self._status_message = ""
 			self._status_timeout = 0
 	
 	def get_status_message(self) -> str:
 		"""Get the current status message"""
+		if self._is_destroyed:
+			return ""
 		return getattr(self, '_status_message', "")
 	
 	def clear_status_message(self):
 		"""Clear the current status message"""
-		self._status_message = ""
-		self._status_timeout = 0
+		if not self._is_destroyed:
+			self._status_message = ""
+			self._status_timeout = 0

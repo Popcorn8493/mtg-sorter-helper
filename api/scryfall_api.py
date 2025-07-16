@@ -185,11 +185,15 @@ class ScryfallAPI:
 
     def fetch_card_collection(self, identifiers: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """
-        Fetches a collection of cards using the Scryfall API's /cards/collection endpoint.
+        FIXED: Fetches a collection of cards using the Scryfall API's /cards/collection endpoint with memory safety.
         This is much more efficient than fetching cards one by one.
         """
         if not identifiers:
             return []
+        
+        # Memory safety: limit batch size for large collections
+        if len(identifiers) > 10000:
+            raise MTGAPIError(f"Collection too large ({len(identifiers)} cards). Please process in smaller batches (<10,000 cards).")
 
         all_cards_data = []
         not_found_ids = []
@@ -201,7 +205,7 @@ class ScryfallAPI:
             payload = {"identifiers": chunk}
 
             try:
-                time.sleep(0.05)  # Rate limiting
+                time.sleep(0.1)  # FIXED: Increased rate limiting to prevent API overload
                 response = self.session.post(SCRYFALL_API_COLLECTION_ENDPOINT, json=payload, timeout=60)
                 response.raise_for_status()
 
@@ -209,6 +213,9 @@ class ScryfallAPI:
 
                 # Add successfully found cards to our list
                 if 'data' in data and data['data']:
+                    # Memory check: prevent excessive accumulation
+                    if len(all_cards_data) + len(data['data']) > 15000:
+                        raise MTGAPIError("Collection response too large, aborting to prevent memory issues.")
                     all_cards_data.extend(data['data'])
 
                 # Keep track of cards that weren't found
