@@ -66,6 +66,7 @@ class NavigableTreeWidget(QTreeWidget):
 	drillDownRequested = pyqtSignal(QTreeWidgetItem)
 	navigateUpRequested = pyqtSignal()
 	markAsortedRequested = pyqtSignal(list)  # List of selected items
+	itemSortedToggled = pyqtSignal(QTreeWidgetItem, bool)  # Item, is_sorted
 	
 	def __init__(self, parent=None):
 		super().__init__(parent)
@@ -96,8 +97,11 @@ class NavigableTreeWidget(QTreeWidget):
 				"• Arrow keys - Navigate between items\n"
 				"• F2 - Show item details (if available)\n\n"
 				"Mouse:\n"
-				"• Double-click - Drill down\n"
-				"• Right-click - Context menu (if available)"
+				"• Click checkbox - Mark group as sorted/unsorted\n"
+				"• Click item name - Select item\n"
+				"• Double-click - Drill down into group\n"
+				"• Right-click - Context menu (if available)\n\n"
+				"Note: Sorted items are hidden unless 'Show Sorted' is checked"
 		)
 		
 		# Enable extended selection by default
@@ -498,6 +502,31 @@ class NavigableTreeWidget(QTreeWidget):
 				try:
 					tree_item = SortableTreeWidgetItem(parent_item, [node.group_name, str(node.count)])
 					tree_item.setData(0, Qt.ItemDataRole.UserRole, node.cards)
+					
+					# Add checkbox functionality
+					tree_item.setFlags(tree_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+					
+					# Check if all cards in this group are sorted
+					if hasattr(node, 'cards') and node.cards:
+						all_sorted = all(c.is_fully_sorted for c in node.cards)
+						if all_sorted:
+							tree_item.setCheckState(0, Qt.CheckState.Checked)
+							# Make sorted items visually muted
+							for col in range(2):
+								tree_item.setForeground(col, QColor(128, 128, 128))
+							
+							# Hide sorted items if show_sorted is disabled
+							# Check if parent has show_sorted_check attribute
+							parent_widget = self.parent()
+							while parent_widget and not hasattr(parent_widget, 'show_sorted_check'):
+								parent_widget = parent_widget.parent()
+							
+							if parent_widget and hasattr(parent_widget, 'show_sorted_check'):
+								show_sorted = parent_widget.show_sorted_check.isChecked()
+								if not show_sorted:
+									tree_item.setHidden(True)
+						else:
+							tree_item.setCheckState(0, Qt.CheckState.Unchecked)
 
 					if hasattr(node, 'unsorted_count') and node.unsorted_count <= 0:
 						font = tree_item.font(0)
@@ -550,6 +579,69 @@ class NavigableTreeWidget(QTreeWidget):
 					traceback.print_exc()
 			
 			QTimer.singleShot(0, final_actions)
+	
+	def mousePressEvent(self, event):
+		"""Handle mouse press events, including checkbox clicks"""
+		if self._is_destroyed or self._in_operation:
+			return
+		
+		item = self.itemAt(event.pos())
+		if item and event.button() == Qt.MouseButton.LeftButton:
+			# Check if click is in the checkbox area (first 20 pixels of first column)
+			column = self.columnAt(event.pos().x())
+			if column == 0 and event.pos().x() < 20:
+				# This is a checkbox click
+				self._handle_checkbox_click(item)
+				event.accept()
+				return
+		
+		# Default handling for other clicks
+		super().mousePressEvent(event)
+	
+	def _handle_checkbox_click(self, item):
+		"""Handle checkbox click to toggle sorted state"""
+		if self._is_destroyed or not item:
+			return
+		
+		try:
+			# Get current checkbox state
+			current_state = item.checkState(0)
+			
+			# Toggle the state
+			if current_state == Qt.CheckState.Checked:
+				new_state = Qt.CheckState.Unchecked
+				is_sorted = False
+			else:
+				new_state = Qt.CheckState.Checked
+				is_sorted = True
+			
+			# Update the checkbox
+			item.setCheckState(0, new_state)
+			
+			# Emit signal for parent to handle the sorted state change
+			self.itemSortedToggled.emit(item, is_sorted)
+			
+		except Exception as e:
+			print(f"Error handling checkbox click: {e}")
+	
+	def set_item_sorted_state(self, item, is_sorted):
+		"""Set the sorted state of an item (updates checkbox)"""
+		if not item:
+			return
+		
+		try:
+			if is_sorted:
+				item.setCheckState(0, Qt.CheckState.Checked)
+				# Make the item visually muted when sorted
+				for col in range(self.columnCount()):
+					item.setForeground(col, QColor(128, 128, 128))
+			else:
+				item.setCheckState(0, Qt.CheckState.Unchecked)
+				# Restore normal appearance
+				for col in range(self.columnCount()):
+					item.setForeground(col, QColor(255, 255, 255))
+		except Exception as e:
+			print(f"Error setting item sorted state: {e}")
 
 class StatusAwareWidget(QObject):
 	"""A mixin class for widgets that provide status updates."""

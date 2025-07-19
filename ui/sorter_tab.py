@@ -18,429 +18,9 @@ from core.constants import Config
 from core.models import Card, SortGroup
 from core.project_manager import ProjectManager
 from ui.custom_widgets import NavigableTreeWidget, SortableTreeWidgetItem
+from ui.set_sorter_view import SetSorterView
 from ui.sorter_tab_ui import SorterTabUi
 from workers.threads import CsvImportWorker, ImageFetchWorker, cleanup_worker_thread
-
-
-class SetSorterView(QWidget):
-	"""A dedicated widget for the 'Sort This Set' view with simple stack overflow prevention."""
-	
-	def __init__(self, cards_to_sort: List[Card], set_name: str, parent_tab: 'ManaBoxSorterTab'):
-		super().__init__()
-		self.cards_to_sort = cards_to_sort
-		self.set_name = set_name
-		self.parent_tab = parent_tab
-		
-		# FIXED: Simple operation flag to prevent recursion
-		self._is_generating = False
-		self._is_destroyed = False
-		self._in_item_click = False
-		
-		self.canvas = None
-		self.ax = None
-		self._setup_ui()
-		
-		# FIXED: Delayed startup
-		QTimer.singleShot(200, self._safe_initial_setup)
-	
-	def _safe_initial_setup(self):
-		"""Safe initial setup"""
-		if not self._is_destroyed and not self._is_generating:
-			self.generate_plan()
-	
-	def cleanup(self):
-		"""Clean up resources"""
-		if self._is_destroyed:
-			return
-		
-		self._is_destroyed = True
-		
-		try:
-			# Disconnect signals safely
-			if hasattr(self, 'tree') and self.tree:
-				self.tree.blockSignals(True)
-				try:
-					self.tree.markAsortedRequested.disconnect()
-					self.tree.itemDoubleClicked.disconnect()
-					self.tree.itemClicked.disconnect()
-				except:
-					pass
-			
-			# Clean up matplotlib canvas
-			if self.canvas:
-				try:
-					self.canvas.deleteLater()
-				except:
-					pass
-				self.canvas = None
-			
-			self.ax = None
-		
-		except Exception as e:
-			print(f"Error in SetSorterView cleanup: {e}")
-	
-	def _setup_ui(self):
-		layout = QVBoxLayout(self)
-		layout.setContentsMargins(0, 0, 0, 0)
-		splitter = QSplitter(Qt.Orientation.Horizontal)
-		layout.addWidget(splitter)
-		
-		chart_group = QGroupBox(f"Optimal Sort Plan for {self.set_name}")
-		chart_layout = QVBoxLayout(chart_group)
-		
-		try:
-			from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-			from matplotlib.figure import Figure
-			import matplotlib
-			matplotlib.use('QtAgg')
-			
-			self.canvas = FigureCanvas(Figure(facecolor='#2b2b2b'))
-			self.ax = self.canvas.figure.subplots()
-			self.ax.tick_params(colors='white')
-			for spine in self.ax.spines.values():
-				spine.set_color('white')
-			chart_layout.addWidget(self.canvas)
-		
-		except Exception as e:
-			error_label = QLabel(f"Chart unavailable: {str(e)}")
-			error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-			error_label.setStyleSheet("color: orange; padding: 20px;")
-			chart_layout.addWidget(error_label)
-			self.canvas = None
-			self.ax = None
-		
-		splitter.addWidget(chart_group)
-		
-		# Right panel setup
-		right_panel = QWidget()
-		right_layout = QVBoxLayout(right_panel)
-		piles_group = QGroupBox("Sorting Piles")
-		piles_layout = QVBoxLayout(piles_group)
-		self.tree = NavigableTreeWidget()
-		self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-		self.tree.setHeaderLabels(["Pile", "Count"])
-		self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-		self.tree.setSortingEnabled(True)
-		piles_layout.addWidget(self.tree)
-		right_layout.addWidget(piles_group)
-		
-		controls_layout = QHBoxLayout()
-		mark_pile_button = QPushButton("Mark Selected as Sorted")
-		controls_layout.addWidget(mark_pile_button)
-		right_layout.addLayout(controls_layout)
-		splitter.addWidget(right_panel)
-		splitter.setSizes([600, 400])
-		
-		# FIXED: Signal connections with deferred execution to prevent recursion
-		try:
-			self.tree.markAsortedRequested.connect(self.on_mark_piles_sorted)
-			mark_pile_button.clicked.connect(lambda: self.on_mark_piles_sorted(self.tree.selectedItems()))
-			self.tree.itemDoubleClicked.connect(lambda item: self.on_mark_piles_sorted([item]))
-			# Use deferred execution to prevent stack overflow
-			self.tree.itemClicked.connect(lambda item, col: QTimer.singleShot(10, lambda: self.on_item_clicked(item, col)))
-		except Exception as e:
-			print(f"Warning: Failed to connect signals: {e}")
-	
-	def on_item_clicked(self, item: QTreeWidgetItem, column: int = 0):
-		"""FIXED: Lazy-load pile contents progressively to prevent stack overflow."""
-		if self._is_destroyed or not item or self._in_item_click:
-			return
-		
-		# Only populate top-level items (piles) that don't have children yet.
-		if item.childCount() > 0 or item.parent() is not None:
-			return
-		
-		# Set guard flag immediately. It will be cleared in the async callback or on error.
-		self._in_item_click = True
-		try:
-			pile_data = item.data(0, Qt.ItemDataRole.UserRole)
-			if not pile_data or not hasattr(pile_data, 'cards'):
-				self._in_item_click = False
-				return
-			
-			cards_in_pile = sorted(pile_data.cards, key=lambda c: c.name or "")
-			show_sorted = self.parent_tab.show_sorted_check.isChecked()
-			
-			# Prepare nodes for progressive population
-			nodes_to_add = []
-			for card in cards_in_pile:
-				unsorted_count = card.quantity - card.sorted_count
-				if not show_sorted and unsorted_count <= 0:
-					continue
-				
-				display_count = card.quantity if show_sorted else unsorted_count
-				# Create a SortGroup-like object that the populator understands
-				node = SortGroup(group_name=card.name, count=display_count, cards=[card])
-				node.unsorted_count = unsorted_count
-				node.is_card_leaf = True  # For styling
-				nodes_to_add.append(node)
-			
-			if not nodes_to_add:
-				self._in_item_click = False
-				return
-			
-			# Provide user feedback and disable updates
-			self.tree.setUpdatesEnabled(False)
-			item.setText(1, f"{item.text(1)} (Loading...)")
-			
-			def on_population_finished():
-				if self._is_destroyed:
-					self._in_item_click = False
-					return
-				try:
-					# Restore original text from stored data and expand
-					pile_node_data = item.data(0, Qt.ItemDataRole.UserRole)
-					if pile_node_data:
-						original_count = pile_node_data.total_count if show_sorted else pile_node_data.unsorted_count
-						item.setText(1, str(int(original_count)))
-					item.setExpanded(True)
-				finally:
-					if not self._is_destroyed: self.tree.setUpdatesEnabled(True)
-					self._in_item_click = False  # Clear guard flag
-			
-			self.tree._populate_tree_progressively(nodes_to_add, parent_item=item, on_finished=on_population_finished)
-		
-		except Exception as e:
-			print(f"Error setting up progressive item population: {e}")
-			self._in_item_click = False  # Ensure flag is reset on error
-	
-	def on_mark_piles_sorted(self, items_to_mark=None):
-		"""FIXED: Simple pile marking with deferred refresh"""
-		if self._is_destroyed:
-			return
-		
-		try:
-			selected_items = items_to_mark or self.tree.selectedItems()
-			if not selected_items:
-				QMessageBox.warning(self, "No Selection", "Please select one or more piles from the list.")
-				return
-			
-			is_toggle_mode = len(selected_items) == 1
-			
-			for item in selected_items:
-				if self._is_destroyed:
-					return
-				
-				pile_data = item.data(0, Qt.ItemDataRole.UserRole)
-				if pile_data and hasattr(pile_data, 'cards'):
-					cards_in_pile = pile_data.cards
-				else:
-					cards_in_pile = self.parent_tab._get_cards_from_item(item)
-				
-				if not cards_in_pile:
-					continue
-				
-				is_already_sorted = all(c.is_fully_sorted for c in cards_in_pile)
-				
-				for card in cards_in_pile:
-					if is_toggle_mode and is_already_sorted:
-						card.sorted_count = 0
-					else:
-						card.sorted_count = card.quantity
-			
-			if not self._is_destroyed:
-				self.parent_tab.show_status_message(f"Updated sorted status for {len(selected_items)} pile(s).")
-				self.parent_tab.project_modified.emit()
-				
-				# Use timer to defer refresh and prevent recursion
-				QTimer.singleShot(100, self._safe_regenerate_plan)
-		
-		except Exception as e:
-			print(f"Error in on_mark_piles_sorted: {e}")
-	
-	def _safe_regenerate_plan(self):
-		"""Safe plan regeneration with guard"""
-		if not self._is_destroyed and not self._is_generating:
-			self.generate_plan()
-	
-	def _get_expanded_items(self):
-		"""Helper to get expanded items safely"""
-		expanded = set()
-		try:
-			iterator = QTreeWidgetItemIterator(self.tree)
-			while iterator.value():
-				item = iterator.value()
-				if item.isExpanded():
-					expanded.add(item.text(0))
-				iterator += 1
-		except:
-			pass
-		return expanded
-	
-	def generate_plan(self):
-		"""FIXED: Generate sorting plan with progressive population to prevent crashes."""
-		if self._is_destroyed or self._is_generating:
-			return
-		
-		self._is_generating = True
-		try:
-			
-			# Save state for restoration
-			expanded_items = self._get_expanded_items()
-			selected_items = {item.text(0) for item in self.tree.selectedItems()}
-			current_item_text = self.tree.currentItem().text(0) if self.tree.currentItem() else None
-			
-			# Generate piles data
-			show_sorted = self.parent_tab.show_sorted_check.isChecked()
-			piles = collections.defaultdict(lambda: {'cards': [], 'total': 0, 'unsorted': 0})
-			
-			# Process grouping logic
-			if self.parent_tab.group_low_count_check.isChecked():
-				try:
-					threshold = int(self.parent_tab.group_threshold_edit.text())
-				except ValueError:
-					threshold = 20
-				
-				# Create letter mapping for grouping
-				raw_letter_totals = collections.defaultdict(int)
-				for card in self.cards_to_sort:
-					name = getattr(card, 'name', '')
-					if name and name != 'N/A':
-						raw_letter_totals[name[0].upper()] += card.quantity
-				
-				mapping = {}
-				buf, tot = "", 0
-				
-				def flush():
-					nonlocal buf, tot
-					if buf:
-						for ch in buf:
-							mapping[ch] = buf
-						buf, tot = "", 0
-				
-				letters = string.ascii_uppercase
-				for i, l in enumerate(letters):
-					count = raw_letter_totals.get(l, 0)
-					if 0 < count < threshold:
-						buf += l
-						tot += count
-						if tot >= threshold or not (i < 25 and raw_letter_totals.get(letters[i + 1], 0) < threshold):
-							flush()
-					else:
-						flush()
-						mapping[l] = l
-				flush()
-				
-				# Apply mapping to cards
-				for card in self.cards_to_sort:
-					name = getattr(card, 'name', '')
-					if name and name != 'N/A':
-						first_letter = name[0].upper()
-						pile_key = mapping.get(first_letter, first_letter)
-						piles[pile_key]['cards'].append(card)
-						piles[pile_key]['total'] += card.quantity
-						piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
-			else:
-				for card in self.cards_to_sort:
-					name = getattr(card, 'name', '')
-					if name and name != 'N/A':
-						pile_key = name[0].upper()
-						piles[pile_key]['cards'].append(card)
-						piles[pile_key]['total'] += card.quantity
-						piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
-			
-			# Create display nodes
-			nodes = []
-			for name, pile_data in piles.items():
-				node = SortGroup(group_name=name, count=pile_data['unsorted'], cards=pile_data['cards'])
-				node.total_count = pile_data['total']
-				node.unsorted_count = pile_data['unsorted']
-				nodes.append(node)
-			
-			if show_sorted:
-				display_nodes = sorted(nodes, key=lambda x: x.total_count, reverse=True)
-				chart_title = f"Card Distribution in {self.set_name} (Total Cards)"
-				tree_header = "Total Count"
-			else:
-				display_nodes = sorted([n for n in nodes if n.unsorted_count > 0], key=lambda x: x.unsorted_count,
-				                       reverse=True)
-				chart_title = f"Unsorted Cards in {self.set_name}"
-				tree_header = "Unsorted Count"
-			
-			# Clear and prepare tree
-			self.tree.setUpdatesEnabled(False)
-			self.tree.clear()
-			self.tree.setHeaderLabels(["Pile", tree_header])
-			
-			def on_population_finished():
-				if self._is_destroyed:
-					self._is_generating = False
-					return
-				try:
-					# Restore state
-					self.tree.blockSignals(True)
-					try:
-						iterator = QTreeWidgetItemIterator(self.tree)
-						while iterator.value():
-							item = iterator.value()
-							if item.text(0) in expanded_items:
-								item.setExpanded(True)
-							if item.text(0) in selected_items:
-								item.setSelected(True)
-							if item.text(0) == current_item_text:
-								self.tree.setCurrentItem(item)
-							iterator += 1
-					finally:
-						self.tree.blockSignals(False)
-					
-					# Sort tree and restore updates
-					self.tree.sortByColumn(1, Qt.SortOrder.DescendingOrder)
-					self.tree.setUpdatesEnabled(True)
-					
-					# Draw chart
-					self._draw_chart_safe(display_nodes, chart_title, show_sorted)
-				
-				except Exception as e:
-					print(f"Error in SetSorterView population callback: {e}")
-				finally:
-					self._is_generating = False
-			
-			# Populate asynchronously
-			self.tree._populate_tree_progressively(display_nodes, on_finished=on_population_finished)
-		
-		except Exception as e:
-			print(f"Error in generate_plan setup: {e}")
-			self._is_generating = False
-	
-	def _draw_chart_safe(self, display_nodes, chart_title, show_sorted):
-		"""Safe chart drawing"""
-		if not self.ax or not self.canvas or self._is_destroyed:
-			return
-		
-		try:
-			self.ax.clear()
-			
-			if not display_nodes:
-				self.ax.text(0.5, 0.5, "Set Complete! All cards sorted.",
-				             ha='center', va='center', color='white', fontsize=16)
-			else:
-				chart_labels = [node.group_name for node in display_nodes]
-				chart_counts = [node.total_count if show_sorted else node.unsorted_count for node in display_nodes]
-				colors = ['#555555' if node.unsorted_count <= 0 else '#007acc' for node in
-				          display_nodes] if show_sorted else '#007acc'
-				
-				bars = self.ax.bar(chart_labels, chart_counts, color=colors, zorder=3)
-				
-				for bar, count in zip(bars, chart_counts):
-					if (height := bar.get_height()) > 0:
-						self.ax.text(bar.get_x() + bar.get_width() / 2., height, f'{int(count)}',
-						             ha='center', va='bottom', color='white', fontsize=8)
-				
-				self.ax.set_title(chart_title, color='white')
-				self.ax.set_ylabel("Card Count", color='white')
-				self.ax.tick_params(axis='x', colors='white', rotation=45 if len(chart_labels) > 10 else 0)
-				self.ax.tick_params(axis='y', colors='white')
-				
-				for spine in self.ax.spines.values():
-					spine.set_color('white')
-				
-				self.ax.grid(axis='y', color='#444444', linestyle='--', linewidth=0.5, zorder=0)
-			
-			self.canvas.figure.tight_layout()
-			self.canvas.draw()
-		
-		except Exception as e:
-			print(f"Error drawing chart: {e}")
 
 
 class ManaBoxSorterTab(QWidget):
@@ -501,39 +81,71 @@ class ManaBoxSorterTab(QWidget):
 		QTimer.singleShot(0, self.setup_ui)
 	
 	def cleanup_workers(self):
-		"""Clean up any running workers"""
+		"""Clean up any running workers WITHOUT marking widget as destroyed"""
+		# Only clean up worker threads, don't mark widget as destroyed
+		cleanup_worker_thread(self.import_thread, self.import_worker)
+		cleanup_worker_thread(self.image_thread, self.image_worker)
+	
+	def cleanup_widget(self):
+		"""Clean up the entire widget and mark as destroyed"""
 		if self._is_destroyed:
 			return
 		
 		self._is_destroyed = True
-		cleanup_worker_thread(self.import_thread, self.import_worker)
-		cleanup_worker_thread(self.image_thread, self.image_worker)
+		self.cleanup_workers()
 	
 	def __del__(self):
 		"""Ensure proper cleanup of workers"""
-		self.cleanup_workers()
+		self.cleanup_widget()
 	
 	def closeEvent(self, event):
 		"""Handle widget close event"""
-		self.cleanup_workers()
+		self.cleanup_widget()
 		super().closeEvent(event)
 	
 	def handle_item_click(self, item: QTreeWidgetItem, next_level: int):
 		"""FIXED: Simple item click handling with drill-down"""
+		print(f"DEBUG: handle_item_click ENTRY - item: '{item.text(0) if item else 'None'}', next_level: {next_level}")
+		print(f"DEBUG: handle_item_click ENTRY - _is_destroyed: {self._is_destroyed}")
+		
 		if self._is_destroyed or not item:
+			print("DEBUG: handle_item_click EARLY RETURN - destroyed or no item")
 			return
 		
 		try:
 			print(f"DEBUG: handle_item_click called for item '{item.text(0)}', next_level: {next_level}")
 			
 			# Always update preview first
+			print("DEBUG: Updating card preview...")
 			self.update_card_preview(item)
+			print("DEBUG: Card preview updated")
 			
 			# Check if we should drill down (avoid for individual cards)
 			self.sort_order = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
 			current_level = next_level - 1
+			current_widget = self.results_stack.currentWidget()
 			
 			print(f"DEBUG: sort_order: {self.sort_order}, current_level: {current_level}")
+			print(f"DEBUG: Selected list count: {self.selected_list.count()}")
+			print(f"DEBUG: Results stack count: {self.results_stack.count()}")
+			print(f"DEBUG: Results stack current index: {self.results_stack.currentIndex()}")
+			print(f"DEBUG: Current widget type: {type(current_widget)}")
+			
+			# Special handling for SetSorterView - when clicking on letter piles, drill down to show Names
+			if isinstance(current_widget, SetSorterView):
+				print("DEBUG: Currently in SetSorterView, drilling down to Names level")
+				# Get cards from the selected pile
+				cards_in_pile = self._get_cards_from_item(item)
+				if cards_in_pile:
+					print(f"DEBUG: Found {len(cards_in_pile)} cards in pile '{item.text(0)}'")
+					# Navigate to the correct level and create a Name view
+					self.navigate_to_level(self.results_stack.currentIndex())
+					breadcrumb_text = item.text(0)
+					self.add_breadcrumb(breadcrumb_text, next_level)
+					# Create a Name-level view instead of another SetSorterView
+					self.create_new_view(cards_in_pile, len(self.sort_order))  # Force to Name level
+					self.update_button_visibility()
+					return
 			
 			if 0 <= current_level < len(self.sort_order) and self.sort_order[current_level] == "Name":
 				# This is a card item, just update preview
@@ -542,57 +154,108 @@ class ManaBoxSorterTab(QWidget):
 			
 			# This is a group item, drill down
 			print("DEBUG: This is a group item, drilling down...")
+			self.show_status_message(f"Drilling down into '{item.text(0).split(': ')[-1]}'...", 2000)
+			print("DEBUG: About to call drill_down...")
 			self.drill_down(item, next_level)
+			print("DEBUG: drill_down call completed")
 		
 		except Exception as e:
 			print(f"Error in handle_item_click: {e}")
+			import traceback
+			traceback.print_exc()
 	
 	def drill_down(self, item: QTreeWidgetItem, next_level: int):
 		"""Handle drill down with crash prevention"""
+		print(f"DEBUG: drill_down called with item '{item.text(0)}', next_level: {next_level}")
+		print(f"DEBUG: _is_destroyed: {self._is_destroyed}, _is_navigating: {self._is_navigating}")
+		
 		if self._is_destroyed or not item or self._is_navigating:
+			print("DEBUG: drill_down early return due to guards")
 			return
 		
 		try:
 			self._is_navigating = True
+			print("DEBUG: Set _is_navigating to True")
 			
 			self.sort_order = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
+			print(f"DEBUG: Current sort_order: {self.sort_order}")
 			
 			if next_level > len(self.sort_order):
+				print(f"DEBUG: Cannot drill down - next_level {next_level} > sort_order length {len(self.sort_order)}")
 				self.show_status_message("Cannot drill down further - no more sort criteria available.", 3000)
 				return
 			
 			# Special handling for Set → First Letter transition
 			current_level_index = next_level - 1
+			print(f"DEBUG: current_level_index: {current_level_index}")
+			
 			if 0 <= current_level_index < len(self.sort_order):
 				current_criterion = self.sort_order[current_level_index]
 				next_criterion = self.sort_order[next_level] if next_level < len(self.sort_order) else None
+				print(f"DEBUG: current_criterion: '{current_criterion}', next_criterion: '{next_criterion}'")
 				
 				if current_criterion == "Set" and next_criterion == "First Letter":
+					print("DEBUG: Detected Set -> First Letter transition")
 					cards_in_set = self._get_cards_from_item(item)
+					print(f"DEBUG: Found {len(cards_in_set)} cards in set")
+					
 					if not cards_in_set:
+						print("DEBUG: No cards found in selected set")
 						self.show_status_message("No cards found in selected set.", 2000)
 						return
 					
+					print("DEBUG: Navigating to level and creating set sorter view")
 					self.navigate_to_level(current_level_index)
 					breadcrumb_text = item.text(0).split(': ')[-1]
 					self.add_breadcrumb(f"{breadcrumb_text} (Letter Sort)", next_level)
 					self.create_set_sorter_view(cards_in_set, breadcrumb_text)
+					print("DEBUG: Set sorter view created")
 					return
 			
 			# Default drill-down behavior
+			print("DEBUG: Using default drill-down behavior")
 			cards_in_group = self._get_cards_from_item(item)
+			print(f"DEBUG: Found {len(cards_in_group)} cards in group")
+			
 			if not cards_in_group:
+				print("DEBUG: No cards found in selected group")
 				self.show_status_message("No cards found in selected group.", 2000)
 				return
 			
+			# Check if we should navigate to final level (cards)
+			if next_level >= len(self.sort_order):
+				print("DEBUG: At final level - showing cards directly")
+				self.show_status_message(f"Showing {len(cards_in_group)} cards in group '{item.text(0)}'.", 2000)
+				return
+			
+			print("DEBUG: Navigating to level and creating new view")
+			print(f"DEBUG: Current stack count: {self.results_stack.count()}")
+			print(f"DEBUG: Navigating to level: {next_level - 1}")
+			
+			# Navigate to the appropriate level
 			self.navigate_to_level(next_level - 1)
-			self.add_breadcrumb(item.text(0), next_level)
+			print(f"DEBUG: After navigation, stack count: {self.results_stack.count()}")
+			
+			# Add breadcrumb for this level
+			breadcrumb_text = item.text(0).split(': ')[-1]  # Remove any prefix
+			self.add_breadcrumb(breadcrumb_text, next_level)
+			print(f"DEBUG: Added breadcrumb: '{breadcrumb_text}'")
+			
+			# Create new view for the next level
 			self.create_new_view(cards_in_group, next_level)
+			print("DEBUG: New view created")
+			
+			# Update button visibility
+			self.update_button_visibility()
+			print("DEBUG: Button visibility updated")
 		
 		except Exception as e:
 			print(f"Error in drill_down: {e}")
+			import traceback
+			traceback.print_exc()
 		finally:
 			self._is_navigating = False
+			print("DEBUG: Set _is_navigating to False")
 	
 	def _refresh_current_view(self):
 		"""Refresh current view with crash prevention and proper async handling."""
@@ -696,7 +359,40 @@ class ManaBoxSorterTab(QWidget):
 	def on_show_sorted_toggled(self):
 		"""FIXED: Handle show sorted toggle with simple defer"""
 		if not self._is_destroyed and not self._is_refreshing:
+			# First update visibility of existing items
+			self._update_sorted_item_visibility()
+			# Then refresh the view
 			QTimer.singleShot(100, self._refresh_current_view)
+	
+	def _update_sorted_item_visibility(self):
+		"""Update visibility of sorted items based on show_sorted checkbox"""
+		if self._is_destroyed:
+			return
+		
+		try:
+			current_widget = self.results_stack.currentWidget()
+			if not isinstance(current_widget, NavigableTreeWidget):
+				return
+			
+			show_sorted = self.show_sorted_check.isChecked()
+			
+			# Iterate through all items and update visibility
+			iterator = QTreeWidgetItemIterator(current_widget)
+			while iterator.value():
+				item = iterator.value()
+				if item:
+					# Check if item is sorted (checkbox checked)
+					is_sorted = item.checkState(0) == Qt.CheckState.Checked
+					if is_sorted:
+						# Hide sorted items if show_sorted is False
+						item.setHidden(not show_sorted)
+					else:
+						# Always show unsorted items
+						item.setHidden(False)
+				iterator += 1
+		
+		except Exception as e:
+			print(f"Error updating sorted item visibility: {e}")
 	
 	def setup_ui(self):
 		"""Creates the UI by delegating to the SorterTabUi class."""
@@ -813,6 +509,11 @@ class ManaBoxSorterTab(QWidget):
 			tree.setHeaderLabels(['Group', header_label])
 			print("DEBUG: Header labels set")
 			
+			print("DEBUG: Enabling checkboxes...")
+			# Enable checkboxes for all items
+			tree.setRootIsDecorated(True)
+			print("DEBUG: Checkboxes enabled")
+			
 			print("DEBUG: Setting header resize mode...")
 			tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
 			print("DEBUG: Header resize mode set")
@@ -825,12 +526,34 @@ class ManaBoxSorterTab(QWidget):
 			# Connect signals with proper handlers (no timers - direct calls)
 			def debug_item_clicked(item, column):
 				print(f"SUCCESS: itemClicked signal received for item: '{item.text(0) if item else 'None'}', column: {column}")
-				self.handle_item_click(item, level + 1)
+				print(f"DEBUG: About to call handle_item_click with level: {level + 1}")
+				print(f"DEBUG: Current results_stack widget: {type(self.results_stack.currentWidget())}")
+				print(f"DEBUG: Current results_stack index: {self.results_stack.currentIndex()}")
+				try:
+					self.handle_item_click(item, level + 1)
+					print(f"DEBUG: handle_item_click completed successfully")
+				except Exception as e:
+					print(f"ERROR: handle_item_click failed: {e}")
+					import traceback
+					traceback.print_exc()
 			
 			tree.itemClicked.connect(debug_item_clicked)
 			print("DEBUG: itemClicked signal connected")
 			
-			tree.itemDoubleClicked.connect(lambda item: self.mark_item_as_sorted(item))
+			# Connect double-click for drill-down only (checkboxes handle sorting now)
+			def debug_item_double_clicked(item, column):
+				print(f"SUCCESS: itemDoubleClicked signal received for item: '{item.text(0) if item else 'None'}', column: {column}")
+				try:
+					# Always drill down on double-click, checkboxes handle marking as sorted
+					print(f"DEBUG: Double-click drilling down (level: {level + 1})")
+					self.handle_item_click(item, level + 1)
+					print(f"DEBUG: Double-click handling completed successfully")
+				except Exception as e:
+					print(f"ERROR: Double-click handling failed: {e}")
+					import traceback
+					traceback.print_exc()
+			
+			tree.itemDoubleClicked.connect(debug_item_double_clicked)
 			print("DEBUG: itemDoubleClicked signal connected")
 			
 			tree.drillDownRequested.connect(lambda item: self.drill_down(item, level + 1))
@@ -844,6 +567,10 @@ class ManaBoxSorterTab(QWidget):
 			
 			tree.currentItemChanged.connect(self.on_tree_selection_changed)
 			print("DEBUG: currentItemChanged signal connected to on_tree_selection_changed")
+			
+			# Connect checkbox signal for sorted state toggle
+			tree.itemSortedToggled.connect(self.on_item_sorted_toggled)
+			print("DEBUG: itemSortedToggled signal connected")
 			
 			print("DEBUG: Determining sort criterion...")
 			self.sort_order = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
@@ -1032,9 +759,21 @@ class ManaBoxSorterTab(QWidget):
 		self.export_button.setVisible(is_normal_view)
 	
 	def show_status_message(self, message: str, timeout: int = 2500):
-		"""Show status message"""
+		"""Show status message with visual feedback"""
 		self.status_label.setText(message)
+		
+		# Add visual feedback for navigation actions
+		if "drill" in message.lower() or "navigat" in message.lower():
+			self.status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+		elif "error" in message.lower() or "fail" in message.lower():
+			self.status_label.setStyleSheet("color: #f44336; font-weight: bold;")
+		elif "sort" in message.lower() or "mark" in message.lower():
+			self.status_label.setStyleSheet("color: #2196F3; font-weight: bold;")
+		else:
+			self.status_label.setStyleSheet("color: #FFC107; font-weight: normal;")
+		
 		QTimer.singleShot(timeout, lambda: self.status_label.setText(""))
+		QTimer.singleShot(timeout, lambda: self.status_label.setStyleSheet(""))
 	
 	def reset_preview_pane(self, *args):
 		"""Reset preview pane safely"""
@@ -1215,9 +954,104 @@ class ManaBoxSorterTab(QWidget):
 			self.show_status_message(f"✓ Group '{item.text(0)}' marked as UNSORTED.")
 		else:
 			self.show_status_message(f"✓ Group '{item.text(0)}' marked as SORTED.")
+			
+			# Check if this level is now complete (all items sorted)
+			QTimer.singleShot(100, lambda: self._check_level_completion(item))
 		
 		self.project_modified.emit()
 		QTimer.singleShot(50, self._refresh_current_view)
+	
+	def _check_level_completion(self, item: QTreeWidgetItem):
+		"""Check if the current level is complete and offer to advance"""
+		if self._is_destroyed:
+			return
+		
+		try:
+			current_widget = self.results_stack.currentWidget()
+			if not isinstance(current_widget, NavigableTreeWidget):
+				return
+			
+			# Get all cards currently visible in this level
+			all_cards_in_level = getattr(current_widget, 'cards_for_view', [])
+			if not all_cards_in_level:
+				return
+			
+			# Check if all cards in this level are sorted
+			all_sorted = all(c.is_fully_sorted for c in all_cards_in_level)
+			if all_sorted:
+				current_level = self.results_stack.currentIndex()
+				sort_order = [self.selected_list.item(i).text() for i in range(self.selected_list.count())]
+				
+				# Check if we're at the final level
+				if current_level >= len(sort_order) - 1:
+					# This is the final level
+					QMessageBox.information(
+						self,
+						"Level Complete!",
+						f"Congratulations! All cards in this group have been sorted.\n\n"
+						f"You can now navigate back to continue with other groups."
+					)
+				else:
+					# There are more levels, ask if user wants to advance
+					next_criterion = sort_order[current_level + 1] if current_level + 1 < len(sort_order) else "Next Level"
+					reply = QMessageBox.question(
+						self,
+						"Level Complete!",
+						f"All cards in this level have been sorted!\n\n"
+						f"Would you like to advance to the next level ({next_criterion})?",
+						QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+						QMessageBox.StandardButton.Yes
+					)
+					
+					if reply == QMessageBox.StandardButton.Yes:
+						# Advance to next level automatically
+						self.show_status_message(f"✓ Advancing to {next_criterion} level...", 3000)
+						# This would require implementing automatic progression logic
+						# For now, just show the message
+		
+		except Exception as e:
+			print(f"Error in _check_level_completion: {e}")
+	
+	def on_item_sorted_toggled(self, item: QTreeWidgetItem, is_sorted: bool):
+		"""Handle checkbox toggle for sorted state"""
+		if self._is_destroyed or not item:
+			return
+		
+		try:
+			# Get cards from the item
+			cards = self._get_cards_from_item(item)
+			if not cards:
+				self.show_status_message("⚠ Could not find cards for this group.")
+				return
+			
+			# Update card sorted status
+			for card in cards:
+				if is_sorted:
+					card.sorted_count = card.quantity
+				else:
+					card.sorted_count = 0
+			
+			# Update visual state of the item
+			current_widget = self.results_stack.currentWidget()
+			if isinstance(current_widget, NavigableTreeWidget):
+				current_widget.set_item_sorted_state(item, is_sorted)
+			
+			# Hide/show item based on sorted state and user preference
+			show_sorted = self.show_sorted_check.isChecked()
+			if is_sorted and not show_sorted:
+				item.setHidden(True)
+			else:
+				item.setHidden(False)
+			
+			# Show status message
+			action = "SORTED" if is_sorted else "UNSORTED"
+			self.show_status_message(f"✓ Marked '{item.text(0)}' as {action}.")
+			
+			# Emit project modified signal
+			self.project_modified.emit()
+			
+		except Exception as e:
+			print(f"Error in on_item_sorted_toggled: {e}")
 	
 	def _mark_cards_as_sorted(self, item: QTreeWidgetItem) -> bool:
 		"""Internal method that only marks cards without refreshing, for batch operations."""
