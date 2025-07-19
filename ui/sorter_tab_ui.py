@@ -103,6 +103,12 @@ class SorterTabUi:
                 "Combine letters with few cards into larger piles for more efficient sorting")
         set_plan_layout.addWidget(self.tab_widget.group_low_count_check)
         
+        self.tab_widget.optimal_grouping_check = QCheckBox("Optimal grouping (max 3 letters per group)")
+        self.tab_widget.optimal_grouping_check.setChecked(False)
+        self.tab_widget.optimal_grouping_check.setToolTip(
+                "Use optimal algorithm to group letters with maximum of 3 letters per pile for efficient physical sorting")
+        set_plan_layout.addWidget(self.tab_widget.optimal_grouping_check)
+        
         threshold_layout = QHBoxLayout()
         threshold_layout.addWidget(QLabel("Min pile total:"))
         self.tab_widget.group_threshold_edit = QLineEdit("20")

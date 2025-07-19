@@ -70,6 +70,7 @@ class SorterPlanner:
     
     def create_set_letter_plan(self, cards: List[Card], set_name: str, 
                              group_low_count: bool = True, 
+                             optimal_grouping: bool = False,
                              threshold: int = 20) -> Tuple[List[SortGroup], Dict[str, str]]:
         """
         Create a letter-based sorting plan for a specific set.
@@ -78,12 +79,15 @@ class SorterPlanner:
             cards: List of cards from the set
             set_name: Name of the set
             group_low_count: Whether to group letters with low card counts
+            optimal_grouping: Whether to use optimal grouping with max 3 letters per group
             threshold: Minimum cards per pile when grouping
             
         Returns:
             Tuple of (sorted groups, letter mapping)
         """
-        if group_low_count:
+        if optimal_grouping:
+            return self._create_optimal_letter_plan(cards, threshold)
+        elif group_low_count:
             return self._create_grouped_letter_plan(cards, threshold)
         else:
             return self._create_simple_letter_plan(cards)
@@ -155,6 +159,105 @@ class SorterPlanner:
             groups.append(group)
         
         return groups, mapping
+    
+    def _create_optimal_letter_plan(self, cards: List[Card], threshold: int) -> Tuple[List[SortGroup], Dict[str, str]]:
+        """Create optimal letter plan with max 3 letters per group using bin packing."""
+        import string
+        
+        # Calculate letter counts
+        raw_letter_totals = collections.defaultdict(int)
+        for card in cards:
+            name = getattr(card, 'name', '')
+            if name and name != 'N/A':
+                raw_letter_totals[name[0].upper()] += card.quantity
+        
+        # Convert to list of (letter, count) pairs and sort by count descending
+        letter_counts = [(letter, raw_letter_totals.get(letter, 0)) for letter in string.ascii_uppercase]
+        letter_counts.sort(key=lambda x: x[1], reverse=True)
+        
+        # Separate high and low count letters
+        high_letters = [(l, c) for l, c in letter_counts if c >= threshold]
+        low_letters = [(l, c) for l, c in letter_counts if 0 < c < threshold]
+        
+        mapping = {}
+        
+        # High count letters stay as individual piles
+        for letter, count in high_letters:
+            mapping[letter] = letter
+        
+        # Group low count letters optimally
+        if low_letters:
+            groups = self._optimal_bin_packing(low_letters, threshold)
+            for group in groups:
+                group_name = ''.join(sorted([letter for letter, _ in group]))
+                for letter, _ in group:
+                    mapping[letter] = group_name
+        
+        # Handle letters with 0 cards
+        for letter in string.ascii_uppercase:
+            if letter not in mapping:
+                mapping[letter] = letter
+        
+        # Create piles with cards
+        piles = collections.defaultdict(lambda: {'cards': [], 'total': 0, 'unsorted': 0})
+        
+        for card in cards:
+            name = getattr(card, 'name', '')
+            if name and name != 'N/A':
+                first_letter = name[0].upper()
+                pile_key = mapping.get(first_letter, first_letter)
+                piles[pile_key]['cards'].append(card)
+                piles[pile_key]['total'] += card.quantity
+                piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
+        
+        # Create SortGroup objects
+        groups = []
+        for pile_name, pile_data in piles.items():
+            group = SortGroup(
+                group_name=pile_name,
+                count=pile_data['unsorted'],
+                cards=pile_data['cards']
+            )
+            group.total_count = pile_data['total']
+            group.unsorted_count = pile_data['unsorted']
+            groups.append(group)
+        
+        return groups, mapping
+    
+    def _optimal_bin_packing(self, items, capacity):
+        """Optimal bin packing algorithm with max 3 items per bin"""
+        if not items:
+            return []
+        
+        # Sort items by size descending for better packing
+        items = sorted(items, key=lambda x: x[1], reverse=True)
+        bins = []
+        
+        for item in items:
+            letter, count = item
+            
+            # Find best bin to place this item (best fit decreasing)
+            best_bin = None
+            best_remaining_space = float('inf')
+            
+            for bin_items in bins:
+                if len(bin_items) >= 3:  # Max 3 letters per group
+                    continue
+                    
+                current_sum = sum(c for _, c in bin_items)
+                if current_sum + count <= capacity:
+                    remaining_space = capacity - (current_sum + count)
+                    if remaining_space < best_remaining_space:
+                        best_remaining_space = remaining_space
+                        best_bin = bin_items
+            
+            if best_bin is not None:
+                best_bin.append(item)
+            else:
+                # Create new bin
+                bins.append([item])
+        
+        return bins
     
     def _create_simple_letter_plan(self, cards: List[Card]) -> Tuple[List[SortGroup], Dict[str, str]]:
         """Create a simple letter plan without grouping."""

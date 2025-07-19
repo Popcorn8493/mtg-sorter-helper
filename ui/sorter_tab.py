@@ -62,6 +62,7 @@ class ManaBoxSorterTab(QWidget):
 		self.available_list: QListWidget | None = None
 		self.selected_list: QListWidget | None = None
 		self.group_low_count_check: QCheckBox | None = None
+		self.optimal_grouping_check: QCheckBox | None = None
 		self.group_threshold_edit: QLineEdit | None = None
 		self.run_button: QPushButton | None = None
 		self.breadcrumb_layout: QHBoxLayout | None = None
@@ -1105,6 +1106,7 @@ class ManaBoxSorterTab(QWidget):
 				"settings":   {
 						"sort_criteria":   sort_criteria,
 						"group_low_count": self.group_low_count_check.isChecked(),
+						"optimal_grouping": self.optimal_grouping_check.isChecked(),
 						"group_threshold": self.group_threshold_edit.text()
 				}
 		}
@@ -1140,6 +1142,7 @@ class ManaBoxSorterTab(QWidget):
 			
 			settings = project_data.get("settings", {})
 			self.group_low_count_check.setChecked(settings.get("group_low_count", True))
+			self.optimal_grouping_check.setChecked(settings.get("optimal_grouping", False))
 			self.group_threshold_edit.setText(settings.get("group_threshold", "20"))
 			
 			# Clear existing criteria before loading new ones

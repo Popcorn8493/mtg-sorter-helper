@@ -326,6 +326,9 @@ class SetSorterView(QWidget):
             # Emit project modified signal
             self.parent_tab.project_modified.emit()
             
+            # Refresh the chart to show updated progress
+            self._refresh_chart()
+            
             # Check if all cards in this set are now sorted for completion
             if is_sorted:
                 all_sorted = all(c.is_fully_sorted for c in self.cards_to_sort)
@@ -399,7 +402,26 @@ class SetSorterView(QWidget):
             piles = collections.defaultdict(lambda: {'cards': [], 'total': 0, 'unsorted': 0})
             
             # Process grouping logic
-            if self.parent_tab.group_low_count_check.isChecked():
+            if self.parent_tab.optimal_grouping_check.isChecked():
+                # Optimal grouping algorithm with max 3 letters per group
+                try:
+                    threshold = int(self.parent_tab.group_threshold_edit.text())
+                except ValueError:
+                    threshold = 20
+                
+                mapping = self._create_optimal_letter_grouping(threshold)
+                
+                # Apply mapping to cards
+                for card in self.cards_to_sort:
+                    name = getattr(card, 'name', '')
+                    if name and name != 'N/A':
+                        first_letter = name[0].upper()
+                        pile_key = mapping.get(first_letter, first_letter)
+                        piles[pile_key]['cards'].append(card)
+                        piles[pile_key]['total'] += card.quantity
+                        piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
+                        
+            elif self.parent_tab.group_low_count_check.isChecked():
                 try:
                     threshold = int(self.parent_tab.group_threshold_edit.text())
                 except ValueError:
@@ -555,3 +577,176 @@ class SetSorterView(QWidget):
         
         except Exception as e:
             print(f"Error drawing chart: {e}")
+    
+    def _refresh_chart(self):
+        """Refresh the chart to reflect current sorting state"""
+        if self._is_destroyed or not self.cards_to_sort:
+            return
+        
+        try:
+            # Recalculate pile data based on current sorting state
+            show_sorted = self.parent_tab.show_sorted_check.isChecked()
+            piles = collections.defaultdict(lambda: {'cards': [], 'total': 0, 'unsorted': 0})
+            
+            # Rebuild pile data from current cards
+            if self.parent_tab.optimal_grouping_check.isChecked():
+                # Use optimal grouping mapping
+                threshold = int(self.parent_tab.group_threshold_edit.text()) if self.parent_tab.group_threshold_edit.text() else 20
+                mapping = self._create_optimal_letter_grouping(threshold)
+                
+                for card in self.cards_to_sort:
+                    name = getattr(card, 'name', '')
+                    if name and name != 'N/A':
+                        first_letter = name[0].upper()
+                        pile_key = mapping.get(first_letter, first_letter)
+                        piles[pile_key]['cards'].append(card)
+                        piles[pile_key]['total'] += card.quantity
+                        piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
+                        
+            elif self.parent_tab.group_low_count_check.isChecked():
+                # Use standard grouping logic - recreate the mapping
+                threshold = int(self.parent_tab.group_threshold_edit.text()) if self.parent_tab.group_threshold_edit.text() else 20
+                
+                raw_letter_totals = collections.defaultdict(int)
+                for card in self.cards_to_sort:
+                    name = getattr(card, 'name', '')
+                    if name and name != 'N/A':
+                        raw_letter_totals[name[0].upper()] += card.quantity
+                
+                mapping = {}
+                buf, tot = "", 0
+                
+                def flush():
+                    nonlocal buf, tot
+                    if buf:
+                        for ch in buf:
+                            mapping[ch] = buf
+                        buf, tot = "", 0
+                
+                letters = string.ascii_uppercase
+                for i, l in enumerate(letters):
+                    count = raw_letter_totals.get(l, 0)
+                    if 0 < count < threshold:
+                        buf += l
+                        tot += count
+                        if tot >= threshold or not (i < 25 and raw_letter_totals.get(letters[i + 1], 0) < threshold):
+                            flush()
+                    else:
+                        flush()
+                        mapping[l] = l
+                flush()
+                
+                for card in self.cards_to_sort:
+                    name = getattr(card, 'name', '')
+                    if name and name != 'N/A':
+                        first_letter = name[0].upper()
+                        pile_key = mapping.get(first_letter, first_letter)
+                        piles[pile_key]['cards'].append(card)
+                        piles[pile_key]['total'] += card.quantity
+                        piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
+            else:
+                # No grouping
+                for card in self.cards_to_sort:
+                    name = getattr(card, 'name', '')
+                    if name and name != 'N/A':
+                        pile_key = name[0].upper()
+                        piles[pile_key]['cards'].append(card)
+                        piles[pile_key]['total'] += card.quantity
+                        piles[pile_key]['unsorted'] += (card.quantity - card.sorted_count)
+            
+            # Create nodes from piles
+            nodes = []
+            for name, pile_data in piles.items():
+                node = SortGroup(group_name=name, count=pile_data['unsorted'], cards=pile_data['cards'])
+                node.total_count = pile_data['total']
+                node.unsorted_count = pile_data['unsorted']
+                nodes.append(node)
+            
+            # Sort and filter nodes
+            if show_sorted:
+                display_nodes = sorted(nodes, key=lambda x: x.total_count, reverse=True)
+                chart_title = f"Card Distribution in {self.set_name} (Total Cards)"
+            else:
+                display_nodes = sorted([n for n in nodes if n.unsorted_count > 0], key=lambda x: x.unsorted_count, reverse=True)
+                chart_title = f"Unsorted Cards in {self.set_name}"
+            
+            # Redraw the chart
+            self._draw_chart_safe(display_nodes, chart_title, show_sorted)
+            
+        except Exception as e:
+            print(f"Error refreshing chart: {e}")
+    
+    def _create_optimal_letter_grouping(self, threshold):
+        """Create optimal letter grouping with max 3 letters per group"""
+        import string
+        
+        # Calculate letter counts
+        raw_letter_totals = collections.defaultdict(int)
+        for card in self.cards_to_sort:
+            name = getattr(card, 'name', '')
+            if name and name != 'N/A':
+                raw_letter_totals[name[0].upper()] += card.quantity
+        
+        # Convert to list of (letter, count) pairs and sort by count descending
+        letter_counts = [(letter, raw_letter_totals.get(letter, 0)) for letter in string.ascii_uppercase]
+        letter_counts.sort(key=lambda x: x[1], reverse=True)
+        
+        # Separate high and low count letters
+        high_letters = [(l, c) for l, c in letter_counts if c >= threshold]
+        low_letters = [(l, c) for l, c in letter_counts if 0 < c < threshold]
+        
+        mapping = {}
+        
+        # High count letters stay as individual piles
+        for letter, count in high_letters:
+            mapping[letter] = letter
+        
+        # Group low count letters optimally
+        if low_letters:
+            groups = self._optimal_bin_packing(low_letters, threshold)
+            for group in groups:
+                group_name = ''.join(sorted([letter for letter, _ in group]))
+                for letter, _ in group:
+                    mapping[letter] = group_name
+        
+        # Handle letters with 0 cards
+        for letter in string.ascii_uppercase:
+            if letter not in mapping:
+                mapping[letter] = letter
+        
+        return mapping
+    
+    def _optimal_bin_packing(self, items, capacity):
+        """Optimal bin packing algorithm with max 3 items per bin"""
+        if not items:
+            return []
+        
+        # Sort items by size descending for better packing
+        items = sorted(items, key=lambda x: x[1], reverse=True)
+        bins = []
+        
+        for item in items:
+            letter, count = item
+            
+            # Find best bin to place this item (best fit decreasing)
+            best_bin = None
+            best_remaining_space = float('inf')
+            
+            for bin_items in bins:
+                if len(bin_items) >= 3:  # Max 3 letters per group
+                    continue
+                    
+                current_sum = sum(c for _, c in bin_items)
+                if current_sum + count <= capacity:
+                    remaining_space = capacity - (current_sum + count)
+                    if remaining_space < best_remaining_space:
+                        best_remaining_space = remaining_space
+                        best_bin = bin_items
+            
+            if best_bin is not None:
+                best_bin.append(item)
+            else:
+                # Create new bin
+                bins.append([item])
+        
+        return bins

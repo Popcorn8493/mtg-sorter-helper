@@ -118,6 +118,7 @@ class NavigableTreeWidget(QTreeWidget):
 		try:
 			self.blockSignals(True)
 			self.itemSelectionChanged.connect(self._safe_on_selection_changed)
+			self.itemChanged.connect(self._on_item_changed)
 			self.blockSignals(False)
 			self._signals_connected = True
 		except Exception as e:
@@ -192,6 +193,27 @@ class NavigableTreeWidget(QTreeWidget):
 		
 		try:
 			self._in_operation = True
+			
+			# Check if double-click is on checkbox area - if so, ignore it
+			item = self.itemAt(event.pos())
+			if item and event.button() == Qt.MouseButton.LeftButton:
+				item_rect = self.visualItemRect(item)
+				
+				# Calculate checkbox area
+				depth = 0
+				parent = item.parent()
+				while parent is not None:
+					depth += 1
+					parent = parent.parent()
+				
+				indent_offset = self.indentation() * depth
+				checkbox_start = item_rect.left() + indent_offset
+				checkbox_end = checkbox_start + 20
+				
+				if event.pos().x() >= checkbox_start and event.pos().x() <= checkbox_end:
+					# This is a double-click on checkbox - ignore it completely
+					event.accept()
+					return
 			
 			if event.button() == Qt.MouseButton.RightButton:
 				self._safe_emit_signal(lambda: self.navigateUpRequested.emit())
@@ -587,16 +609,49 @@ class NavigableTreeWidget(QTreeWidget):
 		
 		item = self.itemAt(event.pos())
 		if item and event.button() == Qt.MouseButton.LeftButton:
-			# Check if click is in the checkbox area (first 20 pixels of first column)
-			column = self.columnAt(event.pos().x())
-			if column == 0 and event.pos().x() < 20:
-				# This is a checkbox click
+			# Get the visual rectangle for the item
+			item_rect = self.visualItemRect(item)
+			
+			# Check if click is in the checkbox area (first 20 pixels from the item content)
+			# Calculate the depth of the item in the tree
+			depth = 0
+			parent = item.parent()
+			while parent is not None:
+				depth += 1
+				parent = parent.parent()
+			
+			# Account for indentation
+			indent_offset = self.indentation() * depth
+			checkbox_start = item_rect.left() + indent_offset
+			checkbox_end = checkbox_start + 20
+			
+			if event.pos().x() >= checkbox_start and event.pos().x() <= checkbox_end:
+				# This is a checkbox click - handle it and completely prevent default behavior
 				self._handle_checkbox_click(item)
 				event.accept()
+				# Don't call super() to prevent any default tree widget behavior
 				return
 		
 		# Default handling for other clicks
 		super().mousePressEvent(event)
+	
+	def _on_item_changed(self, item, column):
+		"""Handle item changes, including checkbox state changes"""
+		if self._is_destroyed or not item or column != 0:
+			return
+		
+		try:
+			# Only handle checkbox changes, not other item changes
+			if hasattr(item, 'checkState'):
+				current_state = item.checkState(0)
+				is_sorted = current_state == Qt.CheckState.Checked
+				
+				# Emit signal for parent to handle the sorted state change
+				# Use queued connection to prevent immediate side effects
+				QTimer.singleShot(0, lambda: self.itemSortedToggled.emit(item, is_sorted))
+			
+		except Exception as e:
+			print(f"Error handling item change: {e}")
 	
 	def _handle_checkbox_click(self, item):
 		"""Handle checkbox click to toggle sorted state"""
@@ -630,6 +685,9 @@ class NavigableTreeWidget(QTreeWidget):
 			return
 		
 		try:
+			# Temporarily block signals to prevent infinite loop
+			self.blockSignals(True)
+			
 			if is_sorted:
 				item.setCheckState(0, Qt.CheckState.Checked)
 				# Make the item visually muted when sorted
@@ -640,8 +698,14 @@ class NavigableTreeWidget(QTreeWidget):
 				# Restore normal appearance
 				for col in range(self.columnCount()):
 					item.setForeground(col, QColor(255, 255, 255))
+			
+			# Re-enable signals
+			self.blockSignals(False)
+			
 		except Exception as e:
 			print(f"Error setting item sorted state: {e}")
+			# Make sure signals are re-enabled even if there's an error
+			self.blockSignals(False)
 
 class StatusAwareWidget(QObject):
 	"""A mixin class for widgets that provide status updates."""
