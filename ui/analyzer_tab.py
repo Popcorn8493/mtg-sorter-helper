@@ -65,7 +65,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.analysis_thread = None
         self.analysis_worker = None
         self.last_analysis_data = None
-        self.options = {}  # Initialize options attribute
+        self.options: dict = {}  # Initialize options attribute
 
         # Defer chart creation to avoid startup conflicts
         self.canvas = None
@@ -149,12 +149,13 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         # Color coding option
         self.color_by_combo = QComboBox()
-        self.color_by_combo.addItems(["None", "Rarity", "Set"])
+        self.color_by_combo.addItems(["None", "Rarity", "Set", "WUBRG Colors"])
         self.color_by_combo.setToolTip(
             "Choose how to color the chart bars:\n\n"
             "• None: Single color for all bars\n"
             "• Rarity: Stack bars by card rarity (common/uncommon/rare/mythic)\n"
-            "• Set: Color bars by source set (useful for multiple sets)"
+            "• Set: Color bars by source set (useful for multiple sets)\n"
+            "• WUBRG Colors: Create 5 separate charts by color identity (White/Blue/Black/Red/Green)"
         )
 
         # Export option
@@ -486,6 +487,13 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         self._reset_ui_state()
         self.last_analysis_data = result
+
+        # Store raw card data for WUBRG analysis
+        if hasattr(self.analysis_worker, "raw_cards"):
+            self.last_analysis_cards = self.analysis_worker.raw_cards
+        else:
+            self.last_analysis_cards = []
+
         self.redraw_chart()
 
         # Handle export
@@ -614,6 +622,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                         color="white",
                         fontsize=8,
                     )
+        elif color_mode == "WUBRG Colors":  # WUBRG color-based charts
+            self._create_wubrg_charts(data)
+            return  # Early return since we create multiple charts
         elif color_mode == "Set":  # Set-based coloring
             self._create_set_colored_chart(data, labels)
         else:  # Rarity coloring
@@ -749,3 +760,213 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 edgecolor="#555",
                 loc="upper right",
             )
+
+    def _create_wubrg_charts(self, data):
+        """Create separate charts organized by WUBRG color identity with proper categorization"""
+        # WUBRG color mapping with improved visibility
+        wubrg_colors = {
+            "W": {"name": "White", "color": "#f0f0f0"},
+            "U": {"name": "Blue", "color": "#007acc"},
+            "B": {
+                "name": "Black",
+                "color": "#808080",
+            },  # Changed from dark to light gray for visibility
+            "R": {"name": "Red", "color": "#cc0000"},
+            "G": {"name": "Green", "color": "#00cc66"},
+        }
+
+        # Clear the current chart
+        self.ax.clear()
+
+        # Get the original card data to determine color identities
+        if not hasattr(self, "last_analysis_cards") or not self.last_analysis_cards:
+            self.ax.text(
+                0.5,
+                0.5,
+                "WUBRG analysis requires card data.\nPlease re-run the analysis.",
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=12,
+                transform=self.ax.transAxes,
+            )
+            self.canvas.draw()
+            return
+
+        # Categorize cards properly
+        single_color_groups = {color: [] for color in wubrg_colors.keys()}
+        multicolor_cards = []
+        colorless_cards = []
+        land_cards = []
+
+        for card_data in self.last_analysis_cards:
+            color_identity = card_data.get("color_identity", [])
+            card_type = card_data.get("type_line", "").lower()
+
+            # Check if it's a land
+            if "land" in card_type:
+                land_cards.append(card_data)
+            elif not color_identity:
+                # True colorless (artifacts, etc.)
+                colorless_cards.append(card_data)
+            elif len(color_identity) == 1:
+                # Single color cards only
+                single_color_groups[color_identity[0]].append(card_data)
+            else:
+                # Multicolor cards
+                multicolor_cards.append(card_data)
+
+        # Create subplots - we need space for all categories
+        fig = self.canvas.figure
+        fig.clear()
+
+        # Determine grid layout based on what we have
+        charts_to_create = []
+
+        # Add single color charts
+        for color_code, color_info in wubrg_colors.items():
+            if single_color_groups[color_code]:
+                charts_to_create.append(
+                    ("single", color_code, color_info, single_color_groups[color_code])
+                )
+
+        # Add multicolor chart if we have multicolor cards
+        if multicolor_cards:
+            charts_to_create.append(
+                (
+                    "multicolor",
+                    None,
+                    {"name": "Multicolor", "color": "#ff6600"},
+                    multicolor_cards,
+                )
+            )
+
+        # Add colorless chart if we have colorless cards
+        if colorless_cards:
+            charts_to_create.append(
+                (
+                    "colorless",
+                    None,
+                    {"name": "Colorless", "color": "#9a9a9a"},
+                    colorless_cards,
+                )
+            )
+
+        # Add lands chart if we have lands
+        if land_cards:
+            charts_to_create.append(
+                ("lands", None, {"name": "Lands", "color": "#8b4513"}, land_cards)
+            )
+
+        if not charts_to_create:
+            self.ax.text(
+                0.5,
+                0.5,
+                "No cards to display in WUBRG analysis.",
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=12,
+                transform=self.ax.transAxes,
+            )
+            self.canvas.draw()
+            return
+
+        # Create grid layout - use 2x3 for up to 6 charts
+        num_charts = len(charts_to_create)
+        if num_charts <= 6:
+            rows, cols = 2, 3
+        elif num_charts <= 9:
+            rows, cols = 3, 3
+        else:
+            rows, cols = 4, 3
+
+        gs = fig.add_gridspec(rows, cols, hspace=0.3, wspace=0.3)
+
+        # Create charts
+        for i, (chart_type, color_code, color_info, cards) in enumerate(
+            charts_to_create
+        ):
+            if i >= rows * cols:
+                break
+
+            row = i // cols
+            col = i % cols
+            ax = fig.add_subplot(gs[row, col])
+
+            # Analyze letter frequency for this category
+            letter_counts = {}
+            for card_data in cards:
+                card_name = card_data.get("name", "")
+                if not card_name:
+                    continue
+
+                first_letter = card_name[0].upper()
+                if first_letter not in letter_counts:
+                    letter_counts[first_letter] = 0
+                letter_counts[first_letter] += 1
+
+            if not letter_counts:
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"No valid {color_info['name']} card names",
+                    ha="center",
+                    va="center",
+                    color="white",
+                    fontsize=10,
+                    transform=ax.transAxes,
+                )
+                ax.set_title(f"{color_info['name']} Cards", color="white", fontsize=10)
+                ax.set_facecolor("#2b2b2b")
+                continue
+
+            # Sort letters by count (descending) for better visualization
+            sorted_letters = sorted(
+                letter_counts.items(), key=lambda x: x[1], reverse=True
+            )
+            letters, counts = zip(*sorted_letters)
+
+            # Create bar chart
+            bars = ax.bar(letters, counts, color=color_info["color"])
+
+            # Add value labels on bars
+            for bar, count in zip(bars, counts):
+                if count > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + max(counts) * 0.01,
+                        str(count),
+                        ha="center",
+                        va="bottom",
+                        color="white",
+                        fontsize=8,
+                    )
+
+            # Style the chart
+            ax.set_title(
+                f"{color_info['name']} Cards ({len(cards)} total)",
+                color="white",
+                fontsize=10,
+            )
+            ax.set_ylabel("Count", color="white", fontsize=8)
+            ax.tick_params(colors="white", labelsize=8)
+            ax.set_facecolor("#2b2b2b")
+
+            # Style spines
+            for spine in ax.spines.values():
+                spine.set_color("white")
+
+        # Set overall title
+        set_codes = data.get("set_codes", [data.get("set_code", "")])
+        if len(set_codes) == 1:
+            title = f"WUBRG Analysis for Set: {set_codes[0].upper()}"
+        else:
+            title = f"WUBRG Analysis for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
+        if "missing_count" in data:
+            title += " (Missing Cards Only)"
+
+        fig.suptitle(title, color="white", fontsize=14, y=0.95)
+
+        # Draw the updated figure
+        self.canvas.draw()
