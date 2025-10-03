@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import QFileDialog, QMessageBox
 from api.scryfall_api import ScryfallAPI
 from core.constants import Config
 from core.models import Card
-from workers.threads import CsvImportWorker
+from workers.threads import CsvImportWorker, LionsEyeImportWorker
 
 
 class SorterImport:
@@ -23,7 +23,29 @@ class SorterImport:
 
         # Thread/worker attributes
         self.import_thread: QThread | None = None
-        self.import_worker: CsvImportWorker | None = None
+        self.import_worker: CsvImportWorker | LionsEyeImportWorker | None = None
+
+    def _detect_csv_format(self, filepath: str) -> str:
+        """Detect the CSV format (ManaBox or Lion's Eye) based on headers"""
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                # Read first few lines to check headers
+                lines = [f.readline().strip() for _ in range(3)]
+
+            # Check for Lion's Eye format headers
+            if any(
+                "Number of Non-foil" in line and "Number of Foil" in line
+                for line in lines
+            ):
+                return "lions_eye"
+
+            # Check for ManaBox format headers
+            if any("Scryfall ID" in line and "Quantity" in line for line in lines):
+                return "manabox"
+
+            return "unknown"
+        except Exception:
+            return "unknown"
 
     def import_csv(self, filepath=None):
         """Import CSV with full functionality"""
@@ -41,7 +63,7 @@ class SorterImport:
 
             filepath, _ = QFileDialog.getOpenFileName(
                 self.parent,
-                "Open ManaBox CSV",
+                "Open Collection CSV",
                 last_dir,
                 "CSV Files (*.csv);;All Files (*.*)",
             )
@@ -67,21 +89,21 @@ class SorterImport:
                 )
                 return
 
-            with open(filepath, "r", encoding="utf-8") as f:
-                header_found = any(
-                    "Scryfall ID" in line and "Quantity" in line
-                    for line in f.readlines(5)
-                )
-                if not header_found:
-                    if (
-                        QMessageBox.question(
-                            self.parent,
-                            "Unrecognized Format",
-                            "This file doesn't look like a ManaBox CSV. Continue anyway?",
-                        )
-                        == QMessageBox.StandardButton.No
-                    ):
-                        return
+            # Detect CSV format
+            csv_format = self._detect_csv_format(filepath)
+            if csv_format == "unknown":
+                if (
+                    QMessageBox.question(
+                        self.parent,
+                        "Unrecognized Format",
+                        "This file doesn't look like a supported CSV format "
+                        "(ManaBox or Lion's Eye). Continue anyway?",
+                    )
+                    == QMessageBox.StandardButton.No
+                ):
+                    return
+                # Default to ManaBox format for unknown files
+                csv_format = "manabox"
         except Exception as e:
             self.parent.handle_file_error(
                 "file access",
@@ -107,9 +129,14 @@ class SorterImport:
             f"Importing {pathlib.Path(filepath).name}", 0
         )
 
-        # Create and start worker thread
+        # Create and start worker thread based on detected format
         self.import_thread = QThread()
-        self.import_worker = CsvImportWorker(filepath, self.api)
+
+        if csv_format == "lions_eye":
+            self.import_worker = LionsEyeImportWorker(filepath, self.api)
+        else:  # Default to ManaBox format
+            self.import_worker = CsvImportWorker(filepath, self.api)
+
         self.import_worker.moveToThread(self.import_thread)
 
         self.import_thread.started.connect(self.import_worker.process)

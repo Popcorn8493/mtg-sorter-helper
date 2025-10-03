@@ -46,6 +46,204 @@ class CsvImportWorker(QObject):
         self.api = api
         self._is_cancelled = False
 
+
+class LionsEyeImportWorker(QObject):
+    """Worker object for Lion's Eye app CSV import operations"""
+
+    # Signals
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal(list)  # cards
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, csv_path: str, api: ScryfallAPI, parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
+        self.api = api
+        self._is_cancelled = False
+
+    def cancel(self):
+        """Cancel the import operation"""
+        self._is_cancelled = True
+
+    def process(self):
+        """Main processing function for Lion's Eye CSV format"""
+        try:
+            # Stream CSV processing to avoid loading entire file into memory
+            scryfall_ids = set()
+            card_quantities = {}
+            total_rows = 0
+
+            # First pass: count rows and collect IDs without loading everything into memory
+            with open(self.csv_path, "r", encoding="utf-8", newline="") as file:
+                reader = csv.DictReader(file)
+
+                for row_num, row in enumerate(reader):
+                    if self._is_cancelled:
+                        return
+
+                    # Memory safety: limit processing if file is too large
+                    if row_num > 50000:  # Reasonable limit for most collections
+                        self.error.emit(
+                            "CSV file too large (>50,000 rows). Please split into smaller files."
+                        )
+                        return
+
+                    total_rows += 1
+
+                    # Lion's Eye format uses "Scryfall ID" column
+                    scryfall_id = row.get("Scryfall ID", "").strip()
+                    if not scryfall_id:
+                        continue
+
+                    # Lion's Eye format has separate foil and non-foil quantities
+                    try:
+                        non_foil_qty = int(row.get("Number of Non-foil", 0))
+                        foil_qty = int(row.get("Number of Foil", 0))
+                        total_quantity = non_foil_qty + foil_qty
+
+                        if total_quantity <= 0:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+
+                    scryfall_ids.add(scryfall_id)
+                    card_quantities[scryfall_id] = (
+                        card_quantities.get(scryfall_id, 0) + total_quantity
+                    )
+
+                    # Throttled progress to prevent signal overload
+                    if row_num % 100 == 0:
+                        self.progress.emit(
+                            min(row_num, total_rows // 2),
+                            total_rows if total_rows > 0 else 1,
+                        )
+
+            if total_rows == 0:
+                self.error.emit("CSV file appears to be empty or has no valid data.")
+                return
+
+            unique_ids = list(scryfall_ids)
+            if not unique_ids:
+                self.error.emit("No valid Scryfall IDs found in CSV file.")
+                return
+
+            # Memory safety check before API calls
+            if not check_memory_safety("Lion's Eye Import - Pre-API", 512):
+                self.error.emit(
+                    "Insufficient memory available for import. Please close other applications and try again."
+                )
+                return
+
+            # Fetch card data using collection endpoint for efficiency
+            self.progress.emit(0, len(unique_ids))
+
+            try:
+                # Prepare identifiers for collection endpoint
+                identifiers = [{"id": card_id} for card_id in unique_ids]
+
+                # Use batch fetching for efficiency
+                fetched_cards = self.api.fetch_card_collection(identifiers)
+
+                # Process fetched cards
+                cards = []
+                fetched_by_id = {card["id"]: card for card in fetched_cards}
+
+                for i, scryfall_id in enumerate(unique_ids):
+                    if self._is_cancelled:
+                        return
+
+                    try:
+                        if scryfall_id in fetched_by_id:
+                            card_data = fetched_by_id[scryfall_id]
+
+                            # Validate card data before processing using centralized validator
+                            is_valid, error_message = CardValidator.validate_card_data(
+                                card_data, scryfall_id
+                            )
+                            if not is_valid:
+                                print(f"Warning: {error_message}")
+                                continue
+
+                            # Create card with additional error handling
+                            try:
+                                card = Card.from_scryfall_dict(card_data)
+                                card.quantity = card_quantities[scryfall_id]
+                                cards.append(card)
+                            except Exception as card_error:
+                                print(
+                                    f"Error creating card from data for {scryfall_id}: {card_error}"
+                                )
+                                print(
+                                    f"Card data keys: {list(card_data.keys()) if isinstance(card_data, dict) else 'Not a dict'}"
+                                )
+                                continue
+                        else:
+                            print(
+                                f"Warning: Scryfall ID {scryfall_id} not found in API response"
+                            )
+
+                    except Exception as processing_error:
+                        print(
+                            f"Error processing card {i+1}/{len(unique_ids)} (ID: {scryfall_id}): {processing_error}"
+                        )
+                        # Continue processing other cards instead of failing completely
+                        continue
+
+                    # FIXED: Throttled progress updates to prevent signal overload
+                    if i % 10 == 0 or i == len(unique_ids) - 1:
+                        try:
+                            self.progress.emit(i + 1, len(unique_ids))
+                        except Exception as progress_error:
+                            print(f"Error emitting progress signal: {progress_error}")
+
+                    # Periodic memory check during processing
+                    if i % 100 == 0 and not check_memory_safety(
+                        "Lion's Eye Import - Processing", 800
+                    ):
+                        self.error.emit(
+                            "Memory usage too high during import. Process aborted."
+                        )
+                        return
+
+                if not cards:
+                    self.error.emit("No valid cards could be loaded from the CSV file.")
+                    return
+
+                self.finished.emit(cards)
+
+            except MTGAPIError as e:
+                self.error.emit(f"API Error: {e}")
+            except Exception as e:
+                self.error.emit(f"Error fetching card data: {str(e)}")
+
+        except FileNotFoundError:
+            self.error.emit(f"CSV file not found: {self.csv_path}")
+        except PermissionError:
+            self.error.emit(f"Permission denied reading file: {self.csv_path}")
+        except UnicodeDecodeError:
+            self.error.emit(
+                "CSV file encoding error. Please ensure the file is saved as UTF-8."
+            )
+        except csv.Error as e:
+            self.error.emit(f"CSV parsing error: {str(e)}")
+        except Exception as e:
+            self.error.emit(f"Unexpected error during import: {str(e)}")
+
+
+class CsvImportWorker(QObject):
+    """Worker object for CSV import operations"""
+
+    # Signals
+    progress = pyqtSignal(int, int)  # current, total
+    finished = pyqtSignal(list)  # cards
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, csv_path: str, api: ScryfallAPI, parent=None):
+        super().__init__(parent)
+        self.csv_path = csv_path
+        self.api = api
+        self._is_cancelled = False
+
     def cancel(self):
         """Cancel the import operation"""
         self._is_cancelled = True
