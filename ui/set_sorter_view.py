@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QGroupBox, QHBoxLayout, QHeaderV
                              QTreeWidgetItemIterator, QVBoxLayout, QWidget)
 from PyQt6.QtGui import QPixmap
 
+from core.decorators import safe_ui_method
 from core.models import Card, SortGroup
 from ui.custom_widgets import NavigableTreeWidget
 
@@ -36,10 +37,11 @@ class SetSorterView(QWidget):
         self._setup_ui()
         
         # FIXED: Delayed startup
-        QTimer.singleShot(200, self._safe_initial_setup)
+        QTimer.singleShot(200, self._initial_setup)
     
-    def _safe_initial_setup(self):
-        """Safe initial setup"""
+    @safe_ui_method("Initial setup failed")
+    def _initial_setup(self):
+        """Initial setup with error protection"""
         if not self._is_destroyed and not self._is_generating:
             self.generate_plan()
     
@@ -281,7 +283,7 @@ class SetSorterView(QWidget):
                     QTimer.singleShot(200, lambda: self._handle_set_completion())
                 else:
                     # Use timer to defer refresh and prevent recursion
-                    QTimer.singleShot(100, self._safe_regenerate_plan)
+                    QTimer.singleShot(100, self._regenerate_plan)
         
         except Exception as e:
             print(f"Error in on_mark_piles_sorted: {e}")
@@ -338,8 +340,9 @@ class SetSorterView(QWidget):
         except Exception as e:
             print(f"Error in on_item_sorted_toggled: {e}")
     
-    def _safe_regenerate_plan(self):
-        """Safe plan regeneration with guard"""
+    @safe_ui_method("Plan regeneration failed")
+    def _regenerate_plan(self):
+        """Regenerate plan with error protection"""
         if not self._is_destroyed and not self._is_generating:
             self.generate_plan()
     

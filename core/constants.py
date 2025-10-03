@@ -8,25 +8,43 @@ import os
 def _get_global_cache_dir():
     """Get global cache directory based on operating system"""
     app_name = "MTGToolkit"
-    
-    if os.name == 'nt':  # Windows
-        cache_base = pathlib.Path(os.environ.get('APPDATA', pathlib.Path.home() / 'AppData' / 'Roaming'))
-    elif os.name == 'posix':  # macOS/Linux  
-        cache_base = pathlib.Path(os.environ.get('XDG_CACHE_HOME', pathlib.Path.home() / '.cache'))
-    else:
-        # Fallback to home directory
-        cache_base = pathlib.Path.home()
-    
-    return cache_base / f"{app_name}_cache"
+
+    try:
+        if os.name == "nt":  # Windows
+            # Use APPDATA if available, otherwise use user profile
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                cache_base = pathlib.Path(appdata)
+            else:
+                cache_base = pathlib.Path.home() / "AppData" / "Roaming"
+        elif os.name == "posix":  # macOS/Linux
+            # Use XDG_CACHE_HOME if available, otherwise use ~/.cache
+            xdg_cache = os.environ.get("XDG_CACHE_HOME")
+            if xdg_cache:
+                cache_base = pathlib.Path(xdg_cache)
+            else:
+                cache_base = pathlib.Path.home() / ".cache"
+        else:
+            # Fallback to home directory
+            cache_base = pathlib.Path.home()
+
+        # Ensure the path is absolute and expanded
+        cache_base = cache_base.resolve()
+        return cache_base / f"{app_name}_cache"
+    except Exception as e:
+        # If all else fails, use a fallback location
+        print(f"Warning: Failed to determine cache directory: {e}")
+        return pathlib.Path.home() / f"{app_name}_cache"
 
 
 class Config:
     """Holds application configuration."""
+
     APP_NAME = "MTGToolkit"
     ORG_NAME = "MTGToolkitOrg"
     SCRYFALL_API_CARD_ENDPOINT = "https://api.scryfall.com/cards/"
     SCRYFALL_API_SET_ENDPOINT = "https://api.scryfall.com/cards/search"
-    
+
     # Global cache directory - persistent across all projects and working directories
     APP_CACHE_DIR = _get_global_cache_dir()
     CARD_CACHE_DIR = APP_CACHE_DIR / "card_data"
@@ -48,29 +66,55 @@ class Config:
 def _setup_global_cache():
     """Setup global cache directories and migrate from old location if needed"""
     import shutil
-    
-    # Create new global cache directories
-    Config.APP_CACHE_DIR.mkdir(exist_ok=True)
-    Config.CARD_CACHE_DIR.mkdir(exist_ok=True)
-    Config.IMAGE_CACHE_DIR.mkdir(exist_ok=True)
-    Config.SET_CACHE_DIR.mkdir(exist_ok=True)
-    
+
+    try:
+        # Create new global cache directories with proper error handling
+        Config.APP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        Config.CARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        Config.IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        Config.SET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+        print(f"Cache directories created successfully at: " f"{Config.APP_CACHE_DIR}")
+    except Exception as e:
+        print(f"Error creating cache directories: {e}")
+        # Try to create a fallback cache directory
+        try:
+            fallback_cache = pathlib.Path.home() / "MTGToolkit_cache"
+            fallback_cache.mkdir(parents=True, exist_ok=True)
+            Config.APP_CACHE_DIR = fallback_cache
+            Config.CARD_CACHE_DIR = fallback_cache / "card_data"
+            Config.IMAGE_CACHE_DIR = fallback_cache / "image_data"
+            Config.SET_CACHE_DIR = fallback_cache / "set_data"
+
+            # Create subdirectories
+            Config.CARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            Config.IMAGE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            Config.SET_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+            print(f"Using fallback cache directory: " f"{fallback_cache}")
+        except Exception as fallback_error:
+            print(
+                f"Critical error: Could not create any cache "
+                f"directories: {fallback_error}"
+            )
+            raise
+
     # Check for old local cache and migrate if it exists
     old_cache_dir = pathlib.Path(".mtgtoolkit_cache")
     if old_cache_dir.exists() and old_cache_dir.is_dir():
         print(f"Found old cache directory: {old_cache_dir}")
-        print(f"Migrating to global cache: {Config.APP_CACHE_DIR}")
-        
+        print(f"Migrating to global cache: " f"{Config.APP_CACHE_DIR}")
+
         try:
             # Migrate each cache type
             for old_subdir, new_subdir in [
                 ("card_data", Config.CARD_CACHE_DIR),
-                ("image_data", Config.IMAGE_CACHE_DIR), 
-                ("set_data", Config.SET_CACHE_DIR)
+                ("image_data", Config.IMAGE_CACHE_DIR),
+                ("set_data", Config.SET_CACHE_DIR),
             ]:
                 old_path = old_cache_dir / old_subdir
                 if old_path.exists():
-                    print(f"Migrating {old_subdir} from {old_path} to {new_subdir}")
+                    print(f"Migrating {old_subdir} from {old_path} " f"to {new_subdir}")
                     files_copied = 0
                     # Copy files from old to new location
                     for file_path in old_path.glob("*"):
@@ -80,20 +124,54 @@ def _setup_global_cache():
                                 shutil.copy2(file_path, new_file_path)
                                 files_copied += 1
                             else:
-                                print(f"Skipped {file_path.name} (already exists)")
+                                print(f"Skipped {file_path.name} " f"(already exists)")
                     print(f"Copied {files_copied} files from {old_subdir}")
                 else:
                     print(f"No {old_subdir} directory found in old cache")
-            
-            print(f"Cache migration completed. You can safely delete: {old_cache_dir}")
-            
+
+            print(
+                f"Cache migration completed. You can safely " f"delete: {old_cache_dir}"
+            )
+
         except Exception as e:
             print(f"Cache migration failed: {e}")
-            print("Old cache will remain, but new cache location will be used going forward.")
-    
+            print(
+                "Old cache will remain, but new cache location "
+                "will be used going forward."
+            )
+
     print(f"Global cache location: {Config.APP_CACHE_DIR}")
 
+
+def verify_cache_accessibility():
+    """Verify that cache directories are accessible and writable"""
+    try:
+        # Test write access to each cache directory
+        test_file = Config.APP_CACHE_DIR / "test_write.tmp"
+        test_file.write_text("test")
+        test_file.unlink()  # Clean up test file
+
+        test_file = Config.CARD_CACHE_DIR / "test_write.tmp"
+        test_file.write_text("test")
+        test_file.unlink()
+
+        test_file = Config.IMAGE_CACHE_DIR / "test_write.tmp"
+        test_file.write_text("test")
+        test_file.unlink()
+
+        test_file = Config.SET_CACHE_DIR / "test_write.tmp"
+        test_file.write_text("test")
+        test_file.unlink()
+
+        print("Cache directories are accessible and writable")
+        return True
+    except Exception as e:
+        print(f"Warning: Cache directories may not be fully " f"accessible: {e}")
+        return False
+
+
 _setup_global_cache()
+verify_cache_accessibility()
 
 
 class ThemeManager:

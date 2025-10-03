@@ -10,6 +10,7 @@ from typing import Dict, List, Any
 import requests
 
 from core.constants import Config
+from core.card_validator import CardValidator
 
 SCRYFALL_API_COLLECTION_ENDPOINT = "https://api.scryfall.com/cards/collection"
 
@@ -98,19 +99,13 @@ class ScryfallAPI:
 
     def fetch_card_by_id(self, scryfall_id: str) -> Dict[str, Any]:
         """Fetch a single card by Scryfall ID with improved error handling"""
-        if not scryfall_id or not isinstance(scryfall_id, str):
+        # Use centralized validator for Scryfall ID validation
+        is_valid, error_message = CardValidator.validate_scryfall_id(scryfall_id)
+        if not is_valid:
             raise MTGAPIError(
-                "Scryfall ID must be a non-empty string",
+                error_message,
                 "validation_error",
                 {"provided_id": scryfall_id}
-            )
-
-        # Check if ID looks like a valid UUID
-        if len(scryfall_id.replace('-', '')) != 32:
-            raise MTGAPIError(
-                f"Invalid Scryfall ID format: {scryfall_id}",
-                "validation_error",
-                {"expected_format": "UUID (32 hex characters with dashes)"}
             )
 
         cache_file = Config.CARD_CACHE_DIR / f"{scryfall_id}.json"

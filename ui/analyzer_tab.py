@@ -4,9 +4,20 @@ import csv
 
 from PyQt6.QtCore import pyqtSignal, QThread
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox, QCheckBox,
-    QGroupBox, QFileDialog, QMessageBox, QProgressBar, QTextEdit
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QPushButton,
+    QLabel,
+    QLineEdit,
+    QComboBox,
+    QCheckBox,
+    QGroupBox,
+    QFileDialog,
+    QMessageBox,
+    QProgressBar,
+    QTextEdit,
 )
 
 from api.scryfall_api import ScryfallAPI
@@ -17,11 +28,25 @@ from .status_manager import StatusManager, StatusAwareMixin
 
 class SetAnalyzerTab(QWidget, StatusAwareMixin):
     RARITY_COLORS = {
-        'common': '#9a9a9a',
-        'uncommon': '#c0c0c0',
-        'rare': '#d4af37',
-        'mythic': '#ff6600'
+        "common": "#9a9a9a",
+        "uncommon": "#c0c0c0",
+        "rare": "#d4af37",
+        "mythic": "#ff6600",
     }
+
+    # Color palette for different sets
+    SET_COLORS = [
+        "#007acc",  # Blue
+        "#ff6600",  # Orange
+        "#00cc66",  # Green
+        "#cc0066",  # Magenta
+        "#6600cc",  # Purple
+        "#cc6600",  # Brown
+        "#0066cc",  # Dark Blue
+        "#cc0000",  # Red
+        "#00cccc",  # Cyan
+        "#cccc00",  # Yellow
+    ]
 
     # Signals for main window communication
     operation_started = pyqtSignal(str, int)  # message, max_value
@@ -32,10 +57,10 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         super().__init__()
         self.api = api
         self.sorter_tab = sorter_tab  # Keep a reference to the sorter tab
-        
+
         # Centralized worker management
         self.worker_manager = WorkerManager()
-        
+
         # Legacy thread/worker attributes for backward compatibility
         self.analysis_thread = None
         self.analysis_worker = None
@@ -66,14 +91,18 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         # Set code input
         self.set_code_edit = QLineEdit()
-        self.set_code_edit.setPlaceholderText("e.g., 'mh3', 'ltr', 'dmu'")
+        self.set_code_edit.setPlaceholderText(
+            "e.g., 'mh3' or 'mh3,ltr,dmu' for multiple sets"
+        )
         self.set_code_edit.setToolTip(
-            "Enter a Magic set code to analyze.\n\n"
-            "Examples:\n"
+            "Enter Magic set code(s) to analyze.\n\n"
+            "Single set:\n"
             "• mh3 - Modern Horizons 3\n"
-            "• ltr - Lord of the Rings\n"
-            "• dmu - Dominaria United\n"
-            "• neo - Kamigawa Neon Dynasty"
+            "• ltr - Lord of the Rings\n\n"
+            "Multiple sets (comma-separated):\n"
+            "• mh3,ltr,dmu - Analyze all three sets combined\n"
+            "• neo,neo2 - Analyze both Kamigawa sets\n\n"
+            "This will combine all cards from the specified sets for analysis."
         )
 
         # Subtract owned cards option
@@ -120,11 +149,12 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         # Color coding option
         self.color_by_combo = QComboBox()
-        self.color_by_combo.addItems(["None", "Rarity"])
+        self.color_by_combo.addItems(["None", "Rarity", "Set"])
         self.color_by_combo.setToolTip(
             "Choose how to color the chart bars:\n\n"
             "• None: Single color for all bars\n"
-            "• Rarity: Stack bars by card rarity (common/uncommon/rare/mythic)"
+            "• Rarity: Stack bars by card rarity (common/uncommon/rare/mythic)\n"
+            "• Set: Color bars by source set (useful for multiple sets)"
         )
 
         # Export option
@@ -149,8 +179,13 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         grid.addWidget(self.export_check, 7, 0, 1, 2)
 
         # Connect signals for dynamic updates
-        for widget in (self.weighted_check, self.group_check, self.preset_combo,
-                       self.threshold_edit, self.color_by_combo):
+        for widget in (
+            self.weighted_check,
+            self.group_check,
+            self.preset_combo,
+            self.threshold_edit,
+            self.color_by_combo,
+        ):
             if isinstance(widget, QCheckBox):
                 widget.stateChanged.connect(self.redraw_chart)
             elif isinstance(widget, QComboBox):
@@ -164,7 +199,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         # Run button
         self.run_button = QPushButton("Run Analysis")
         self.run_button.setObjectName("AccentButton")
-        self.run_button.setToolTip("Start the set analysis with current settings (Shortcut: Ctrl+R)")
+        self.run_button.setToolTip(
+            "Start the set analysis with current settings (Shortcut: Ctrl+R)"
+        )
         self.run_button.clicked.connect(self.run_analysis)
         layout.addWidget(self.run_button)
 
@@ -189,7 +226,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.results_summary.setVisible(False)
         self.results_summary.setReadOnly(True)
         layout.addWidget(self.results_summary)
-        
+
         # Initialize StatusAwareMixin after UI is set up
         StatusAwareMixin.__init__(self)
         self._init_status_manager()
@@ -201,19 +238,22 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             return
         # Import matplotlib components just-in-time to avoid startup conflicts
         import matplotlib
-        matplotlib.use('QtAgg')  # Explicitly use modern backend for PyQt6
+
+        matplotlib.use("QtAgg")  # Explicitly use modern backend for PyQt6
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
+        from matplotlib.backends.backend_qtagg import (
+            NavigationToolbar2QT as NavigationToolbar,
+        )
         from matplotlib.figure import Figure
 
         # Create matplotlib figure with dark theme
-        self.canvas = FigureCanvas(Figure(facecolor='#2b2b2b'))
+        self.canvas = FigureCanvas(Figure(facecolor="#2b2b2b"))
         self.ax = self.canvas.figure.subplots()
 
         # Style the plot for dark theme
-        self.ax.tick_params(colors='white')
+        self.ax.tick_params(colors="white")
         for spine in self.ax.spines.values():
-            spine.set_color('white')
+            spine.set_color("white")
 
         # Add navigation toolbar
         toolbar = NavigationToolbar(self.canvas, self)
@@ -228,27 +268,44 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self._create_chart_area(self.chart_layout)
 
         # Validate inputs
-        set_code = self.set_code_edit.text().strip().lower()
-        if not set_code:
+        set_input = self.set_code_edit.text().strip().lower()
+        if not set_input:
             QMessageBox.information(
                 self,
                 "Missing Set Code",
                 "Please enter a set code to analyze.\n\n"
-                "Examples: mh3, ltr, dmu, neo"
+                "Examples: mh3, ltr, dmu, neo\n"
+                "Multiple sets: mh3,ltr,dmu",
             )
             self.set_code_edit.setFocus()
             return
 
-        # Validate set code format (basic check)
-        if len(set_code) < 2 or len(set_code) > 6:
+        # Parse multiple set codes
+        set_codes = [code.strip() for code in set_input.split(",")]
+        set_codes = [code for code in set_codes if code]  # Remove empty strings
+
+        if not set_codes:
+            QMessageBox.information(
+                self, "Invalid Set Codes", "Please enter valid set codes to analyze."
+            )
+            self.set_code_edit.setFocus()
+            return
+
+        # Validate each set code format
+        invalid_codes = []
+        for set_code in set_codes:
+            if len(set_code) < 2 or len(set_code) > 6:
+                invalid_codes.append(set_code)
+
+        if invalid_codes:
             reply = QMessageBox.question(
                 self,
-                "Unusual Set Code",
-                f"'{set_code}' doesn't look like a typical set code.\n\n"
+                "Unusual Set Codes",
+                f"These set codes don't look typical: {', '.join(invalid_codes)}\n\n"
                 "Most set codes are 3-4 characters (e.g., 'mh3', 'ltr').\n\n"
                 "Do you want to continue anyway?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
+                QMessageBox.StandardButton.No,
             )
             if reply == QMessageBox.StandardButton.No:
                 return
@@ -258,9 +315,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             threshold = float(self.threshold_edit.text())
             if threshold < 1:
                 QMessageBox.warning(
-                    self,
-                    "Invalid Threshold",
-                    "Minimum group total must be at least 1."
+                    self, "Invalid Threshold", "Minimum group total must be at least 1."
                 )
                 self.threshold_edit.setFocus()
                 return
@@ -268,7 +323,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             QMessageBox.warning(
                 self,
                 "Invalid Number",
-                "Please enter a valid number for the minimum group total."
+                "Please enter a valid number for the minimum group total.",
             )
             self.threshold_edit.setFocus()
             return
@@ -285,7 +340,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     "• Continue without subtracting owned cards, or\n"
                     "• Cancel and load a collection first?",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Cancel
+                    QMessageBox.StandardButton.Cancel,
                 )
                 if reply == QMessageBox.StandardButton.Cancel:
                     return
@@ -296,25 +351,28 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         # Prepare options
         self.options = {
-            'set_code': set_code,
-            'weighted': self.weighted_check.isChecked(),
-            'preset': self.preset_combo.currentText(),
-            'group': self.group_check.isChecked(),
-            'threshold': threshold,
-            'owned_cards': owned_cards
+            "set_codes": set_codes,
+            "weighted": self.weighted_check.isChecked(),
+            "preset": self.preset_combo.currentText(),
+            "group": self.group_check.isChecked(),
+            "threshold": threshold,
+            "owned_cards": owned_cards,
         }
 
         # Handle export option
         if self.export_check.isChecked():
+            # Create filename based on number of sets
+            if len(set_codes) == 1:
+                filename = f"{set_codes[0]}_analysis.csv"
+            else:
+                filename = f"combined_{len(set_codes)}_sets_analysis.csv"
+
             filepath, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Analysis CSV",
-                f"{set_code}_analysis.csv",
-                "CSV Files (*.csv);All Files (*.*)"
+                self, "Save Analysis CSV", filename, "CSV Files (*.csv);All Files (*.*)"
             )
             if not filepath:
                 return
-            self.options['export_path'] = filepath
+            self.options["export_path"] = filepath
 
         # Start analysis
         self._start_analysis()
@@ -328,11 +386,20 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.progress_bar.setRange(0, 0)  # Indeterminate initially
         self.results_summary.setVisible(False)
 
-        set_code = self.options['set_code'].upper()
-        self.show_status_message(f"Starting analysis for '{set_code}'...", style='info')
-
-        # Emit signal for main window
-        self.operation_started.emit(f"Analyzing set {set_code}", 0)
+        set_codes = self.options["set_codes"]
+        if len(set_codes) == 1:
+            set_display = set_codes[0].upper()
+            self.show_status_message(
+                f"Starting analysis for '{set_display}'...", style="info"
+            )
+            self.operation_started.emit(f"Analyzing set {set_display}", 0)
+        else:
+            set_display = ", ".join(code.upper() for code in set_codes)
+            self.show_status_message(
+                f"Starting analysis for {len(set_codes)} sets: {set_display}...",
+                style="info",
+            )
+            self.operation_started.emit(f"Analyzing {len(set_codes)} sets", 0)
 
         # Create and start worker
         self.analysis_thread = QThread()
@@ -362,47 +429,58 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
     def on_status_update(self, message: str):
         """Handle status updates from worker"""
-        self.show_status_message(message, style='info')
+        self.show_status_message(message, style="info")
 
     def cancel_analysis(self):
         """Cancel the current analysis"""
         # Use centralized worker management
         self.worker_manager.cleanup_all()
-        
+
         # Legacy cleanup for backward compatibility
         if self.analysis_thread and self.analysis_thread.isRunning():
             from workers.threads import cleanup_worker_thread
+
             cleanup_worker_thread(self.analysis_thread, self.analysis_worker)
 
         self._reset_ui_state()
-        self.show_status_message("Analysis cancelled.", style='warning')
+        self.show_status_message("Analysis cancelled.", style="warning")
         self.operation_finished.emit()
 
     def on_analysis_finished(self, result):
         """Handle successful analysis completion"""
-        set_code_str = f"'{result['set_code'].upper()}'"
+        set_codes = result.get("set_codes", [result.get("set_code", "")])
+        if len(set_codes) == 1:
+            set_code_str = f"'{set_codes[0].upper()}'"
+        else:
+            set_code_str = f"{len(set_codes)} sets: {', '.join(code.upper() for code in set_codes)}"
 
         # Create detailed summary
         summary_parts = [f"Analysis completed for {set_code_str}"]
 
-        if 'missing_count' in result:
-            owned = result.get('owned_count', 0)
-            missing = result.get('missing_count', 0)
-            total = result.get('original_set_size', owned + missing)
+        if "missing_count" in result:
+            owned = result.get("owned_count", 0)
+            missing = result.get("missing_count", 0)
+            total = result.get("original_set_size", owned + missing)
             summary_parts.append(f"Set contains {total} cards total")
             summary_parts.append(f"You own {owned} cards ({owned / total * 100:.1f}%)")
-            summary_parts.append(f"Missing {missing} cards ({missing / total * 100:.1f}%)")
+            summary_parts.append(
+                f"Missing {missing} cards ({missing / total * 100:.1f}%)"
+            )
             set_code_str += " (Missing Cards Only)"
         else:
-            total = result.get('total_cards_analyzed', 0)
+            total = result.get("total_cards_analyzed", 0)
             summary_parts.append(f"Analyzed {total} cards")
 
-        if result['weighted']:
-            summary_parts.append("Weighted analysis using " + self.options['preset'] + " preset")
+        if result["weighted"]:
+            summary_parts.append(
+                "Weighted analysis using " + self.options["preset"] + " preset"
+            )
 
-        summary_text = '\n'.join(summary_parts)
+        summary_text = "\n".join(summary_parts)
 
-        self.show_status_message(f"Analysis complete for {set_code_str}", style='success')
+        self.show_status_message(
+            f"Analysis complete for {set_code_str}", style="success"
+        )
         self.results_summary.setText(summary_text)
         self.results_summary.setVisible(True)
 
@@ -411,14 +489,14 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.redraw_chart()
 
         # Handle export
-        if export_path := self.analysis_worker.options.get('export_path'):
+        if export_path := self.analysis_worker.options.get("export_path"):
             self._export_results(export_path, result)
 
         self.operation_finished.emit()
 
     def on_analysis_error(self, error_message: str):
         """Handle analysis errors with detailed feedback"""
-        self.show_status_message("Analysis failed - see details below", style='error')
+        self.show_status_message("Analysis failed - see details below", style="error")
         self._reset_ui_state()
 
         # Show detailed error in results area
@@ -426,7 +504,10 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.results_summary.setVisible(True)
 
         # Also show popup for critical errors
-        if any(term in error_message.lower() for term in ['not found', 'invalid', 'connection']):
+        if any(
+            term in error_message.lower()
+            for term in ["not found", "invalid", "connection"]
+        ):
             QMessageBox.warning(self, "Analysis Failed", error_message)
 
         self.operation_finished.emit()
@@ -440,15 +521,15 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
     def _export_results(self, export_path: str, result: dict):
         """Export analysis results to CSV"""
         try:
-            if not result['sorted_groups']:
+            if not result["sorted_groups"]:
                 QMessageBox.information(self, "Export Info", "No data to export.")
                 return
 
             # Prepare data for export
-            weighted = result['weighted']
+            weighted = result["weighted"]
             flat_results = [
-                (group, data['total_weighted' if weighted else 'total_raw'])
-                for group, data in result['sorted_groups']
+                (group, data["total_weighted" if weighted else "total_raw"])
+                for group, data in result["sorted_groups"]
             ]
 
             # Write CSV
@@ -460,7 +541,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             QMessageBox.information(
                 self,
                 "Export Successful",
-                f"Analysis results exported to:\n{export_path}"
+                f"Analysis results exported to:\n{export_path}",
             )
 
         except PermissionError:
@@ -468,13 +549,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 self,
                 "Export Failed",
                 f"Cannot write to '{export_path}'.\n\n"
-                "The file may be open in another program or you may not have write permissions."
+                "The file may be open in another program or you may not have write permissions.",
             )
         except Exception as e:
             QMessageBox.critical(
-                self,
-                "Export Error",
-                f"Failed to export results:\n\n{str(e)}"
+                self, "Export Error", f"Failed to export results:\n\n{str(e)}"
             )
 
     def redraw_chart(self):
@@ -489,31 +568,39 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.ax.clear()
         data = self.last_analysis_data
 
-        if not data['sorted_groups']:
+        if not data["sorted_groups"]:
             self.ax.text(
-                0.5, 0.5,
+                0.5,
+                0.5,
                 "No cards to display.\n(You might own the entire set!)",
-                ha='center', va='center', color='white', fontsize=12,
-                transform=self.ax.transAxes
+                ha="center",
+                va="center",
+                color="white",
+                fontsize=12,
+                transform=self.ax.transAxes,
             )
-            title = f"Card Distribution for Set: {data['set_code'].upper()}"
-            if 'missing_count' in data:
+            set_codes = data.get("set_codes", [data.get("set_code", "")])
+            if len(set_codes) == 1:
+                title = f"Card Distribution for Set: {set_codes[0].upper()}"
+            else:
+                title = f"Card Distribution for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
+            if "missing_count" in data:
                 title += " (Missing Cards)"
-            self.ax.set_title(title, color='white')
+            self.ax.set_title(title, color="white")
             self.canvas.draw()
             return
 
         # Prepare data
         color_mode = self.color_by_combo.currentText()
-        labels = [item[0] for item in data['sorted_groups']]
+        labels = [item[0] for item in data["sorted_groups"]]
 
         # Create chart based on color mode
         if color_mode == "None":
             values = [
-                item[1]['total_weighted' if data['weighted'] else 'total_raw']
-                for item in data['sorted_groups']
+                item[1]["total_weighted" if data["weighted"] else "total_raw"]
+                for item in data["sorted_groups"]
             ]
-            bars = self.ax.bar(labels, values, color='#007acc')
+            bars = self.ax.bar(labels, values, color="#007acc")
 
             # Add value labels on bars
             for bar, value in zip(bars, values):
@@ -522,19 +609,27 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                         bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + max(values) * 0.01,
                         str(int(value)),
-                        ha='center', va='bottom', color='white', fontsize=8
+                        ha="center",
+                        va="bottom",
+                        color="white",
+                        fontsize=8,
                     )
+        elif color_mode == "Set":  # Set-based coloring
+            self._create_set_colored_chart(data, labels)
         else:  # Rarity coloring
             all_rarities = sorted(list(self.RARITY_COLORS.keys()))
             bottoms = {label: 0 for label in labels}
 
             for rarity in all_rarities:
-                values = [item[1]['rarity'].get(rarity, 0) for item in data['sorted_groups']]
+                values = [
+                    item[1]["rarity"].get(rarity, 0) for item in data["sorted_groups"]
+                ]
                 bars = self.ax.bar(
-                    labels, values,
+                    labels,
+                    values,
                     bottom=[bottoms[l] for l in labels],
-                    color=self.RARITY_COLORS.get(rarity, '#ffffff'),
-                    label=rarity.title()
+                    color=self.RARITY_COLORS.get(rarity, "#ffffff"),
+                    label=rarity.title(),
                 )
 
                 # Update bottoms for stacking
@@ -543,33 +638,114 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
             # Add legend
             self.ax.legend(
-                labelcolor='white',
-                facecolor='#3c3f41',
-                edgecolor='#555',
-                loc='upper right'
+                labelcolor="white",
+                facecolor="#3c3f41",
+                edgecolor="#555",
+                loc="upper right",
             )
 
         # Set title and labels
-        title = f"Card Distribution for Set: {data['set_code'].upper()}"
-        if 'missing_count' in data:
+        set_codes = data.get("set_codes", [data.get("set_code", "")])
+        if len(set_codes) == 1:
+            title = f"Card Distribution for Set: {set_codes[0].upper()}"
+        else:
+            title = f"Card Distribution for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
+        if "missing_count" in data:
             title += " (Missing Cards Only)"
 
-        self.ax.set_title(title, color='white', fontsize=12, pad=20)
+        self.ax.set_title(title, color="white", fontsize=12, pad=20)
 
         ylabel = "Count"
-        if data['weighted']:
+        if data["weighted"]:
             ylabel = f"Weighted Score ({self.options.get('preset', 'default')} preset)"
-        self.ax.set_ylabel(ylabel, color='white')
+        self.ax.set_ylabel(ylabel, color="white")
 
         # Style the plot
-        self.ax.tick_params(colors='white')
+        self.ax.tick_params(colors="white")
         for spine in self.ax.spines.values():
-            spine.set_color('white')
+            spine.set_color("white")
 
         # Rotate x-axis labels if needed
         if len(labels) > 10:
-            self.ax.tick_params(axis='x', rotation=45)
+            self.ax.tick_params(axis="x", rotation=45)
 
         # Adjust layout and draw
         self.canvas.figure.tight_layout()
         self.canvas.draw()
+
+    def _create_set_colored_chart(self, data, labels):
+        """Create a chart colored by set with legend"""
+        set_codes = data.get("set_codes", [])
+
+        # If only one set, use single color
+        if len(set_codes) <= 1:
+            values = [
+                item[1]["total_weighted" if data["weighted"] else "total_raw"]
+                for item in data["sorted_groups"]
+            ]
+            bars = self.ax.bar(labels, values, color=self.SET_COLORS[0])
+
+            # Add value labels
+            for bar, value in zip(bars, values):
+                if value > 0:
+                    self.ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + max(values) * 0.01,
+                        str(int(value)),
+                        ha="center",
+                        va="bottom",
+                        color="white",
+                        fontsize=8,
+                    )
+            return
+
+        # Multiple sets - create stacked bars
+        set_colors = {
+            set_code: self.SET_COLORS[i % len(self.SET_COLORS)]
+            for i, set_code in enumerate(set_codes)
+        }
+
+        # Create stacked bars for each set
+        bottoms = {label: 0 for label in labels}
+        legend_handles = []
+
+        for set_code in set_codes:
+            values = []
+            for item in data["sorted_groups"]:
+                set_breakdown = item[1].get("set_breakdown", {})
+                values.append(set_breakdown.get(set_code, 0))
+
+            if any(v > 0 for v in values):  # Only show sets with cards
+                bars = self.ax.bar(
+                    labels,
+                    values,
+                    bottom=[bottoms[label] for label in labels],
+                    color=set_colors[set_code],
+                    label=set_code.upper(),
+                )
+
+                # Update bottoms for stacking
+                for i, label in enumerate(labels):
+                    bottoms[label] += values[i]
+
+                # Store handle for legend
+                if bars:
+                    legend_handles.append(bars[0])
+
+        # Add legend
+        if legend_handles:
+            self.ax.legend(
+                handles=legend_handles,
+                labels=[
+                    set_code.upper()
+                    for set_code in set_codes
+                    if any(
+                        item[1].get("set_breakdown", {}).get(set_code, 0) > 0
+                        for item in data["sorted_groups"]
+                    )
+                ],
+                labelcolor="white",
+                facecolor="#3c3f41",
+                edgecolor="#555",
+                loc="upper right",
+            )
