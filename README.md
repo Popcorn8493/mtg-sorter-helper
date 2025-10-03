@@ -10,6 +10,9 @@ A desktop application to help Magic: The Gathering collection sorting and analyz
 - **Hierarchical Sorting**: Create nested sorting plans based on configurable criteria
 - **Progress Tracking**: Track sorting progress with visual indicators
 
+![MTG Sorter Helper Screenshot](img.png)
+
+
 ## Requirements
 
 - Python 3.8+
