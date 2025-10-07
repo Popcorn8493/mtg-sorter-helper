@@ -705,7 +705,8 @@ class SetAnalysisWorker(QObject):
                     if len(current_group) == 1:
                         group_key = current_group[0]
                     else:
-                        group_key = f"Group {group_number} ({group_name})"
+                        # Use parentheses to indicate grouped letters
+                        group_key = f"({group_name})"
                         group_number += 1
 
                     # Combine data

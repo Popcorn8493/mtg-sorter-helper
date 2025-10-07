@@ -1,8 +1,9 @@
 # ui/analyzer_tab.py
 
 import csv
+import warnings
 
-from PyQt6.QtCore import pyqtSignal, QThread
+from PyQt6.QtCore import pyqtSignal, QThread, Qt
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -18,6 +19,8 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QTextEdit,
+    QSplitter,
+    QDialog,
 )
 
 from api.scryfall_api import ScryfallAPI
@@ -70,18 +73,49 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         # Defer chart creation to avoid startup conflicts
         self.canvas = None
         self.ax = None
+        self.toolbar = None
+        self.maximized_dialog = None
 
-        main_layout = QHBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(splitter)
 
         # Left panel - controls
         controls_group = QGroupBox("Analysis Options")
         controls_layout = QVBoxLayout(controls_group)
-        main_layout.addWidget(controls_group, 1)
+        splitter.addWidget(controls_group)
 
-        # Right panel - results
-        chart_group = QGroupBox("Analysis Results")
-        self.chart_layout = QVBoxLayout(chart_group)
-        main_layout.addWidget(chart_group, 2)
+        # Right panel - results with maximize button
+        chart_container = QWidget()
+        chart_container_layout = QVBoxLayout(chart_container)
+        chart_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Chart header with title and maximize button
+        chart_header = QHBoxLayout()
+        chart_title = QLabel("Analysis Results")
+        chart_title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        chart_header.addWidget(chart_title)
+        chart_header.addStretch()
+
+        self.maximize_button = QPushButton("⛶ Maximize")
+        self.maximize_button.setToolTip("Maximize chart view (Escape to exit)")
+        self.maximize_button.setMaximumWidth(120)
+        self.maximize_button.clicked.connect(self._toggle_maximize_chart)
+        chart_header.addWidget(self.maximize_button)
+
+        chart_container_layout.addLayout(chart_header)
+
+        # Chart layout area
+        self.chart_layout = QVBoxLayout()
+        chart_container_layout.addLayout(self.chart_layout)
+
+        splitter.addWidget(chart_container)
+
+        # Set initial splitter sizes (30% controls, 70% chart)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 7)
 
         self._create_controls(controls_layout)
 
@@ -203,18 +237,44 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         )
         from matplotlib.figure import Figure
 
-        self.canvas = FigureCanvas(Figure(facecolor="#2b2b2b"))
+        # Create figure with dynamic sizing based on available space
+        # Get screen DPI for high-resolution displays
+        try:
+            screen_dpi = self.screen().logicalDotsPerInch()
+            fig_dpi = min(screen_dpi * 0.8, 100)  # Cap at 100 to prevent too-large figures
+        except:
+            fig_dpi = 80
+
+        fig = Figure(facecolor="#2b2b2b", constrained_layout=False, dpi=fig_dpi)
+
+        self.canvas = FigureCanvas(fig)
+        self.canvas.setMinimumSize(400, 300)
+
+        # Enable dynamic resizing
+        self.canvas.setSizePolicy(
+            self.canvas.sizePolicy().horizontalPolicy(),
+            self.canvas.sizePolicy().verticalPolicy()
+        )
+        self.canvas.updateGeometry()
         self.ax = self.canvas.figure.subplots()
 
         self.ax.tick_params(colors="white")
         for spine in self.ax.spines.values():
             spine.set_color("white")
 
-        toolbar = NavigationToolbar(self.canvas, self)
-        toolbar.setObjectName("qt_toolbar_navigation")
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.setObjectName("qt_toolbar_navigation")
 
-        layout.addWidget(toolbar)
-        layout.addWidget(self.canvas)
+        # Add toolbar info label
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.addWidget(self.toolbar)
+        toolbar_layout.addStretch()
+        zoom_hint = QLabel("💡 Use toolbar to pan/zoom")
+        zoom_hint.setStyleSheet("color: #888; font-size: 10px;")
+        toolbar_layout.addWidget(zoom_hint)
+
+        layout.addLayout(toolbar_layout)
+        layout.addWidget(self.canvas, 1)
 
     def run_analysis(self):
         self._create_chart_area(self.chart_layout)
@@ -502,6 +562,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 "G": {"name": "Green", "color": "#00cc66"},
             }
 
+            # Extract letter grouping mapping
+            letter_mapping = self._extract_letter_grouping_from_data(result)
+
             single_color_groups: dict = {color: [] for color in wubrg_colors.keys()}
             multicolor_cards = []
             colorless_cards = []
@@ -554,9 +617,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                         if not card_name:
                             continue
                         first_letter = card_name[0].upper()
-                        if first_letter not in letter_counts:
-                            letter_counts[first_letter] = 0
-                        letter_counts[first_letter] += 1
+                        # Apply letter grouping if mapping exists
+                        grouped_letter = letter_mapping.get(first_letter, first_letter)
+                        if grouped_letter not in letter_counts:
+                            letter_counts[grouped_letter] = 0
+                        letter_counts[grouped_letter] += 1
 
                     sorted_letters = sorted(
                         letter_counts.items(), key=lambda x: x[1], reverse=True
@@ -614,6 +679,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 title += " (Missing Cards)"
             self.ax.set_title(title, color="white")
             self.canvas.draw()
+            self.canvas.flush_events()
+            if self.toolbar:
+                self.toolbar.update()
             return
 
         color_mode = self.color_by_combo.currentText()
@@ -692,6 +760,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
         self.canvas.figure.tight_layout()
         self.canvas.draw()
+        self.canvas.flush_events()
+
+        # Update toolbar
+        if self.toolbar:
+            self.toolbar.update()
 
     def _create_set_colored_chart(self, data, labels):
         set_codes = data.get("set_codes", [])
@@ -762,7 +835,40 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 loc="upper right",
             )
 
+    def _extract_letter_grouping_from_data(self, data):
+        """Extract letter-to-group mapping from sorted_groups data"""
+        letter_mapping = {}
+
+        if not data.get("sorted_groups"):
+            return letter_mapping
+
+        for group_name, group_data in data["sorted_groups"]:
+            # Check if this is a grouped entry
+            if group_name.startswith("(") and group_name.endswith(")"):
+                # New format: "(ABC)"
+                letters = group_name[1:-1]  # Remove parentheses
+                for letter in letters:
+                    letter_mapping[letter] = group_name
+            elif group_name.startswith("Group ") and "(" in group_name:
+                # Old format: "Group 1 (ABC)" - for backward compatibility
+                letters = group_name.split("(")[1].rstrip(")")
+                for letter in letters:
+                    letter_mapping[letter] = group_name
+            elif len(group_name) > 1 and all(c.isalpha() for c in group_name):
+                # Handle multi-letter groups like "XYZ" (legacy format)
+                for letter in group_name:
+                    letter_mapping[letter] = group_name
+            else:
+                # Single letter, maps to itself
+                letter_mapping[group_name] = group_name
+
+        return letter_mapping
+
     def _create_wubrg_charts(self, data):
+        # Create WUBRG subgraphs with proper layout handling
+        self._create_wubrg_charts_impl(data)
+
+    def _create_wubrg_charts_impl(self, data):
         wubrg_colors = {
             "W": {"name": "White", "color": "#f0f0f0"},
             "U": {"name": "Blue", "color": "#007acc"},
@@ -781,11 +887,18 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 ha="center",
                 va="center",
                 color="white",
-                fontsize=12,
+                fontsize=14,
+                weight='bold',
                 transform=self.ax.transAxes,
             )
             self.canvas.draw()
+            self.canvas.flush_events()
+            if self.toolbar:
+                self.toolbar.update()
             return
+
+        # Extract letter grouping mapping from sorted_groups if grouping is enabled
+        letter_mapping = self._extract_letter_grouping_from_data(data)
 
         single_color_groups = {color: [] for color in wubrg_colors.keys()}
         multicolor_cards = []
@@ -849,21 +962,29 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 ha="center",
                 va="center",
                 color="white",
-                fontsize=12,
+                fontsize=14,
+                weight='bold',
                 transform=self.ax.transAxes,
             )
             self.canvas.draw()
+            self.canvas.flush_events()
+            if self.toolbar:
+                self.toolbar.update()
             return
 
         num_charts = len(charts_to_create)
-        if num_charts <= 6:
+        if num_charts <= 4:
+            rows, cols = 2, 2
+        elif num_charts <= 6:
             rows, cols = 2, 3
         elif num_charts <= 9:
             rows, cols = 3, 3
         else:
             rows, cols = 4, 3
 
-        gs = fig.add_gridspec(rows, cols, hspace=0.4, wspace=0.4)
+        # Increased spacing to prevent label overlap and title clipping
+        # Larger bottom margin for bigger fonts
+        gs = fig.add_gridspec(rows, cols, hspace=0.90, wspace=0.50, bottom=0.18, top=0.84)
 
         for i, (chart_type, color_code, color_info, cards) in enumerate(
             charts_to_create
@@ -882,9 +1003,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     continue
 
                 first_letter = card_name[0].upper()
-                if first_letter not in letter_counts:
-                    letter_counts[first_letter] = 0
-                letter_counts[first_letter] += 1
+                # Apply letter grouping if mapping exists
+                grouped_letter = letter_mapping.get(first_letter, first_letter)
+                if grouped_letter not in letter_counts:
+                    letter_counts[grouped_letter] = 0
+                letter_counts[grouped_letter] += 1
 
             if not letter_counts:
                 ax.text(
@@ -894,10 +1017,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     ha="center",
                     va="center",
                     color="white",
-                    fontsize=10,
+                    fontsize=11,
+                    weight='bold',
                     transform=ax.transAxes,
                 )
-                ax.set_title(f"{color_info['name']} Cards", color="white", fontsize=10)
+                ax.set_title(f"{color_info['name']} Cards", color="white", fontsize=14, pad=10, weight='bold')
                 ax.set_facecolor("#2b2b2b")
                 continue
 
@@ -917,36 +1041,80 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                         ha="center",
                         va="bottom",
                         color="white",
-                        fontsize=8,
+                        fontsize=10,
+                        weight='bold',
                     )
 
             ax.set_title(
-                f"{color_info['name']} Cards ({len(cards)} total)",
+                f"{color_info['name']} ({len(cards)})",
                 color="white",
-                fontsize=10,
-                pad=15,
+                fontsize=14,
+                pad=10,
+                weight='bold',
             )
-            ax.set_ylabel("Count", color="white", fontsize=8)
-            ax.tick_params(colors="white", labelsize=8)
+            ax.set_ylabel("Count", color="white", fontsize=11, weight='bold')
             ax.set_facecolor("#2b2b2b")
 
-            if len(letters) > 8:
-                ax.tick_params(axis="x", rotation=45, labelsize=7)
+            # Set y-axis tick label size
+            ax.tick_params(axis="y", labelsize=10, colors="white")
+            for label in ax.get_yticklabels():
+                label.set_fontweight('bold')
+
+            # Improved x-axis label handling to prevent overlap
+            if len(letters) > 15:
+                # Many entries: smaller font with 45° rotation
+                ax.tick_params(axis="x", rotation=45, labelsize=9, colors="white", pad=3)
+                for label in ax.get_xticklabels():
+                    label.set_ha('right')
+                    label.set_va('top')
+                    label.set_fontweight('bold')
+            elif len(letters) > 10:
+                # Moderate entries: 45° rotation with readable font
+                ax.tick_params(axis="x", rotation=45, labelsize=10, colors="white", pad=3)
+                for label in ax.get_xticklabels():
+                    label.set_ha('right')
+                    label.set_va('top')
+                    label.set_fontweight('bold')
+            elif len(letters) > 6:
+                # Few-moderate entries: 45° rotation
+                ax.tick_params(axis="x", rotation=45, labelsize=11, colors="white", pad=3)
+                for label in ax.get_xticklabels():
+                    label.set_ha('right')
+                    label.set_va('top')
+                    label.set_fontweight('bold')
+            else:
+                # Few entries: horizontal labels
+                ax.tick_params(colors="white", labelsize=11)
+                for label in ax.get_xticklabels():
+                    label.set_fontweight('bold')
 
             for spine in ax.spines.values():
                 spine.set_color("white")
+                spine.set_linewidth(1.5)
 
         set_codes = data.get("set_codes", [data.get("set_code", "")])
         if len(set_codes) == 1:
-            title = f"WUBRG Analysis for Set: {set_codes[0].upper()}"
+            title = f"WUBRG Analysis: {set_codes[0].upper()}"
         else:
-            title = f"WUBRG Analysis for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
+            title = f"WUBRG Analysis: {len(set_codes)} Sets ({', '.join(code.upper() for code in set_codes)})"
         if "missing_count" in data:
-            title += " (Missing Cards Only)"
+            title += " - Missing Only"
 
-        fig.suptitle(title, color="white", fontsize=14, y=0.98)
+        fig.suptitle(title, color="white", fontsize=16, y=0.96, weight='bold')
 
+        # Apply tight_layout with rect to leave room for suptitle
+        # rect=[left, bottom, right, top] in figure coordinates
+        fig.tight_layout(rect=[0, 0, 1, 0.85])
+
+        # Update canvas and ensure toolbar is in sync
         self.canvas.draw()
+        self.canvas.flush_events()
+
+        # Enable toolbar navigation for subplots
+        if self.toolbar:
+            self.toolbar.update()
+            # Force toolbar to recognize all subplot axes
+            self.canvas.figure.canvas.toolbar = self.toolbar
 
         if (
             hasattr(self, "last_analysis_cards")
@@ -974,6 +1142,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             )
             if not export_dir:
                 return
+
+            # Extract letter grouping mapping
+            letter_mapping = self._extract_letter_grouping_from_data(result)
 
             # Categorize cards
             wubrg_colors = {
@@ -1015,6 +1186,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                         single_color_groups[color_code],
                         color_info["name"],
                         color_info["color"],
+                        letter_mapping,
                     )
                     exported_files.append(filename)
 
@@ -1023,7 +1195,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 filename = f"{base_filename}_multicolor.csv"
                 filepath = f"{export_dir}/{filename}"
                 self._export_color_breakdown(
-                    filepath, multicolor_cards, "Multicolor", "#ff6600"
+                    filepath, multicolor_cards, "Multicolor", "#ff6600", letter_mapping
                 )
                 exported_files.append(filename)
 
@@ -1032,7 +1204,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 filename = f"{base_filename}_colorless.csv"
                 filepath = f"{export_dir}/{filename}"
                 self._export_color_breakdown(
-                    filepath, colorless_cards, "Colorless", "#9a9a9a"
+                    filepath, colorless_cards, "Colorless", "#9a9a9a", letter_mapping
                 )
                 exported_files.append(filename)
 
@@ -1040,7 +1212,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             if land_cards:
                 filename = f"{base_filename}_lands.csv"
                 filepath = f"{export_dir}/{filename}"
-                self._export_color_breakdown(filepath, land_cards, "Lands", "#8b4513")
+                self._export_color_breakdown(filepath, land_cards, "Lands", "#8b4513", letter_mapping)
                 exported_files.append(filename)
 
             # Combined summary export
@@ -1058,6 +1230,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     **({"Colorless": colorless_cards} if colorless_cards else {}),
                     **({"Lands": land_cards} if land_cards else {}),
                 },
+                letter_mapping,
             )
             exported_files.append(summary_filename)
 
@@ -1079,16 +1252,21 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 f"Failed to export WUBRG results:\n\n{str(e)}",
             )
 
-    def _export_color_breakdown(self, filepath, cards, color_name, color_hex):
+    def _export_color_breakdown(self, filepath, cards, color_name, color_hex, letter_mapping=None):
+        if letter_mapping is None:
+            letter_mapping = {}
+
         letter_counts = {}
         for card_data in cards:
             card_name = card_data.get("name", "")
             if not card_name:
                 continue
             first_letter = card_name[0].upper()
-            if first_letter not in letter_counts:
-                letter_counts[first_letter] = 0
-            letter_counts[first_letter] += 1
+            # Apply letter grouping if mapping exists
+            grouped_letter = letter_mapping.get(first_letter, first_letter)
+            if grouped_letter not in letter_counts:
+                letter_counts[grouped_letter] = 0
+            letter_counts[grouped_letter] += 1
 
         sorted_letters = sorted(letter_counts.items(), key=lambda x: x[1], reverse=True)
 
@@ -1105,7 +1283,10 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     [color_name, color_hex, letter, count, f"{percentage:.1f}%"]
                 )
 
-    def _export_wubrg_summary(self, filepath, all_categories):
+    def _export_wubrg_summary(self, filepath, all_categories, letter_mapping=None):
+        if letter_mapping is None:
+            letter_mapping = {}
+
         with open(filepath, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(
@@ -1133,9 +1314,11 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     if not card_name:
                         continue
                     first_letter = card_name[0].upper()
-                    if first_letter not in letter_counts:
-                        letter_counts[first_letter] = 0
-                    letter_counts[first_letter] += 1
+                    # Apply letter grouping if mapping exists
+                    grouped_letter = letter_mapping.get(first_letter, first_letter)
+                    if grouped_letter not in letter_counts:
+                        letter_counts[grouped_letter] = 0
+                    letter_counts[grouped_letter] += 1
 
                 sorted_letters = sorted(
                     letter_counts.items(), key=lambda x: x[1], reverse=True
@@ -1259,8 +1442,12 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     base_filename = (
                         f"combined_{len(set_codes)}_sets_{category_name.lower()}"
                     )
+
+                # Extract letter grouping mapping from the analysis data
+                letter_mapping = self._extract_letter_grouping_from_data(self.last_analysis_data)
             else:
                 base_filename = f"analysis_{category_name.lower()}"
+                letter_mapping = {}
 
             filename = f"{base_filename}.csv"
             filepath, _ = QFileDialog.getSaveFileName(
@@ -1272,7 +1459,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             if not filepath:
                 return
 
-            self._export_color_breakdown(filepath, cards, category_name, color_hex)
+            self._export_color_breakdown(filepath, cards, category_name, color_hex, letter_mapping)
 
             QMessageBox.information(
                 self,
@@ -1286,3 +1473,137 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 "Export Error",
                 f"Failed to export {category_name} results:\n\n{str(e)}",
             )
+
+    def _toggle_maximize_chart(self):
+        """Toggle fullscreen/maximized view of the chart"""
+        if self.maximized_dialog and self.maximized_dialog.isVisible():
+            # Restore from maximized
+            self._restore_chart()
+        else:
+            # Maximize chart
+            self._maximize_chart()
+
+    def _maximize_chart(self):
+        """Show chart in maximized dialog"""
+        if not self.canvas:
+            return
+
+        # Create fullscreen dialog
+        self.maximized_dialog = QDialog(self)
+        self.maximized_dialog.setWindowTitle("Analysis Chart - Maximized View")
+        self.maximized_dialog.setWindowFlags(
+            Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint
+        )
+
+        # Make it fill most of the screen
+        screen = self.screen().availableGeometry()
+        self.maximized_dialog.setGeometry(
+            screen.x() + 50,
+            screen.y() + 50,
+            screen.width() - 100,
+            screen.height() - 100,
+        )
+
+        layout = QVBoxLayout(self.maximized_dialog)
+
+        # Add instructions
+        header = QHBoxLayout()
+        info_label = QLabel("Press Escape or click Restore to exit fullscreen")
+        info_label.setStyleSheet("color: #888; font-size: 11px; padding: 5px;")
+        header.addWidget(info_label)
+        header.addStretch()
+
+        restore_button = QPushButton("⛶ Restore")
+        restore_button.setMaximumWidth(100)
+        restore_button.clicked.connect(self._restore_chart)
+        header.addWidget(restore_button)
+
+        layout.addLayout(header)
+
+        # Move canvas and toolbar to dialog
+        if self.toolbar and self.toolbar.parent():
+            self.toolbar.setParent(None)
+            layout.addWidget(self.toolbar)
+
+        if self.canvas.parent():
+            self.canvas.setParent(None)
+            layout.addWidget(self.canvas, 1)
+
+        # Update button text
+        self.maximize_button.setText("⛶ Restore")
+        self.maximize_button.setToolTip("Restore normal view")
+
+        # Show maximized
+        self.maximized_dialog.show()
+
+        # Redraw to adjust to new size
+        if self.canvas:
+            self.canvas.draw()
+            self.canvas.flush_events()
+
+    def _restore_chart(self):
+        """Restore chart to normal view"""
+        if not self.maximized_dialog:
+            return
+
+        # Move canvas and toolbar back to main layout
+        if self.toolbar:
+            self.toolbar.setParent(None)
+
+        if self.canvas:
+            self.canvas.setParent(None)
+
+        # Re-add to chart layout
+        if self.toolbar:
+            toolbar_layout = QHBoxLayout()
+            toolbar_layout.addWidget(self.toolbar)
+            toolbar_layout.addStretch()
+            zoom_hint = QLabel("💡 Use toolbar to pan/zoom")
+            zoom_hint.setStyleSheet("color: #888; font-size: 10px;")
+            toolbar_layout.addWidget(zoom_hint)
+            self.chart_layout.insertLayout(0, toolbar_layout)
+
+        if self.canvas:
+            self.chart_layout.insertWidget(1, self.canvas, 1)
+
+        # Update button text
+        self.maximize_button.setText("⛶ Maximize")
+        self.maximize_button.setToolTip("Maximize chart view (Escape to exit)")
+
+        # Close and cleanup dialog
+        self.maximized_dialog.close()
+        self.maximized_dialog.deleteLater()
+        self.maximized_dialog = None
+
+        # Redraw to adjust to new size
+        if self.canvas:
+            self.canvas.draw()
+            self.canvas.flush_events()
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts"""
+        if event.key() == Qt.Key.Key_Escape and self.maximized_dialog:
+            self._restore_chart()
+        else:
+            super().keyPressEvent(event)
+
+    def resizeEvent(self, event):
+        """Handle window resize to adjust chart"""
+        super().resizeEvent(event)
+        if self.canvas and self.canvas.isVisible():
+            # Trigger a redraw on resize to adjust layout
+            self.canvas.updateGeometry()
+            if self.last_analysis_data:
+                # Small delay to let the resize complete
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(100, self._handle_resize_redraw)
+
+    def _handle_resize_redraw(self):
+        """Redraw chart after resize"""
+        if self.canvas and self.last_analysis_data:
+            try:
+                self.canvas.draw()
+                if self.toolbar:
+                    self.toolbar.update()
+            except Exception:
+                pass  # Ignore errors during resize
