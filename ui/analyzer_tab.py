@@ -1,227 +1,134 @@
-# ui/analyzer_tab.py
-
 import csv
-import warnings
 
 from PyQt6.QtCore import pyqtSignal, QThread, Qt
-from PyQt6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
-    QHBoxLayout,
-    QGridLayout,
-    QPushButton,
-    QLabel,
-    QLineEdit,
-    QComboBox,
-    QCheckBox,
-    QGroupBox,
-    QFileDialog,
-    QMessageBox,
-    QProgressBar,
-    QTextEdit,
-    QSplitter,
-    QDialog,
-)
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel, QLineEdit, QComboBox, \
+    QCheckBox, QGroupBox, QFileDialog, QMessageBox, QProgressBar, QTextEdit, QSplitter, QDialog
 
 from api.scryfall_api import ScryfallAPI
-from workers.threads import SetAnalysisWorker, WorkerManager
 from ui.sorter_tab import ManaBoxSorterTab
 from ui.status_manager import StatusAwareMixin
+from workers.threads import SetAnalysisWorker, WorkerManager
 
 
 class SetAnalyzerTab(QWidget, StatusAwareMixin):
-    RARITY_COLORS = {
-        "common": "#9a9a9a",
-        "uncommon": "#c0c0c0",
-        "rare": "#d4af37",
-        "mythic": "#ff6600",
-    }
-
-    # Color palette for different sets
-    SET_COLORS = [
-        "#007acc",  # Blue
-        "#ff6600",  # Orange
-        "#00cc66",  # Green
-        "#cc0066",  # Magenta
-        "#6600cc",  # Purple
-        "#cc6600",  # Brown
-        "#0066cc",  # Dark Blue
-        "#cc0000",  # Red
-        "#00cccc",  # Cyan
-        "#cccc00",  # Yellow
-    ]
-
-    # Signals for main window communication
-    operation_started = pyqtSignal(str, int)  # message, max_value
+    RARITY_COLORS = {'common': '#9a9a9a', 'uncommon': '#c0c0c0', 'rare': '#d4af37', 'mythic': '#ff6600'}
+    SET_COLORS = ['#007acc', '#ff6600', '#00cc66', '#cc0066', '#6600cc', '#cc6600', '#0066cc', '#cc0000', '#00cccc', '#cccc00']
+    operation_started = pyqtSignal(str, int)
     operation_finished = pyqtSignal()
     progress_updated = pyqtSignal(int)
 
-    def __init__(self, api: ScryfallAPI, sorter_tab: "ManaBoxSorterTab"):
+    def __init__(self, api: ScryfallAPI, sorter_tab: 'ManaBoxSorterTab'):
         super().__init__()
         self.api = api
-        self.sorter_tab = sorter_tab  # Keep a reference to the sorter tab
-
-        # Centralized worker management
+        self.sorter_tab = sorter_tab
         self.worker_manager = WorkerManager()
-
-        # Legacy thread/worker attributes for backward compatibility
         self.analysis_thread = None
         self.analysis_worker = None
         self.last_analysis_data = None
-        self.options: dict = {}  # Initialize options attribute
-
-        # Defer chart creation to avoid startup conflicts
+        self.options: dict = {}
         self.canvas = None
         self.ax = None
         self.toolbar = None
         self.maximized_dialog = None
-
         main_layout = QVBoxLayout(self)
-
-        # Create splitter for resizable panels
         splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(splitter)
-
-        # Left panel - controls
-        controls_group = QGroupBox("Analysis Options")
+        controls_group = QGroupBox('Analysis Options')
         controls_layout = QVBoxLayout(controls_group)
         splitter.addWidget(controls_group)
-
-        # Right panel - results with maximize button
         chart_container = QWidget()
         chart_container_layout = QVBoxLayout(chart_container)
         chart_container_layout.setContentsMargins(0, 0, 0, 0)
-
-        # Chart header with title and maximize button
         chart_header = QHBoxLayout()
-        chart_title = QLabel("Analysis Results")
-        chart_title.setStyleSheet("font-weight: bold; font-size: 12px;")
+        chart_title = QLabel('Analysis Results')
+        chart_title.setStyleSheet('font-weight: bold; font-size: 12px;')
         chart_header.addWidget(chart_title)
         chart_header.addStretch()
-
-        self.maximize_button = QPushButton("⛶ Maximize")
-        self.maximize_button.setToolTip("Maximize chart view (Escape to exit)")
+        self.maximize_button = QPushButton(' Maximize')
+        self.maximize_button.setToolTip('Maximize chart view (Escape to exit)')
         self.maximize_button.setMaximumWidth(120)
         self.maximize_button.clicked.connect(self._toggle_maximize_chart)
         chart_header.addWidget(self.maximize_button)
-
         chart_container_layout.addLayout(chart_header)
-
-        # Chart layout area
         self.chart_layout = QVBoxLayout()
         chart_container_layout.addLayout(self.chart_layout)
-
         splitter.addWidget(chart_container)
-
-        # Set initial splitter sizes (30% controls, 70% chart)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 7)
-
         self._create_controls(controls_layout)
 
     def _create_controls(self, layout):
         grid = QGridLayout()
-
         self.set_code_edit = QLineEdit()
-        self.set_code_edit.setPlaceholderText(
-            "e.g., 'mh3' or 'mh3,ltr,dmu' for multiple sets"
-        )
-        self.set_code_edit.setToolTip("Enter Magic set code(s) to analyze")
-
-        self.subtract_owned_check = QCheckBox("Subtract Owned Cards (from Collection)")
-        self.subtract_owned_check.setToolTip("Exclude owned cards from analysis")
-
-        self.weighted_check = QCheckBox("Weighted Analysis")
-        self.weighted_check.setToolTip("Weight cards by rarity")
-
+        self.set_code_edit.setPlaceholderText("e.g., 'mh3' or 'mh3,ltr,dmu' for multiple sets")
+        self.set_code_edit.setToolTip('Enter Magic set code(s) to analyze')
+        self.subtract_owned_check = QCheckBox('Subtract Owned Cards (from Collection)')
+        self.subtract_owned_check.setToolTip('Exclude owned cards from analysis')
+        self.weighted_check = QCheckBox('Weighted Analysis')
+        self.weighted_check.setToolTip('Weight cards by rarity')
         self.preset_combo = QComboBox()
-        self.preset_combo.addItems(["default", "play_booster", "dynamic"])
-        self.preset_combo.setToolTip("Choose weighting strategy")
-
-        self.group_check = QCheckBox("Group low count letters")
+        self.preset_combo.addItems(['default', 'play_booster', 'dynamic'])
+        self.preset_combo.setToolTip('Choose weighting strategy')
+        self.group_check = QCheckBox('Group low count letters')
         self.group_check.setChecked(True)
-        self.group_check.setToolTip("Combine letters with few cards")
-
-        self.threshold_edit = QLineEdit("20")
-        self.threshold_edit.setToolTip("Minimum cards for grouping")
-
+        self.group_check.setToolTip('Combine letters with few cards')
+        self.threshold_edit = QLineEdit('20')
+        self.threshold_edit.setToolTip('Minimum cards for grouping')
         self.color_by_combo = QComboBox()
-        self.color_by_combo.addItems(["None", "Rarity", "Set", "WUBRG Colors"])
-        self.color_by_combo.setToolTip("Choose chart coloring")
-
-        self.export_check = QCheckBox("Export to CSV on run")
-        self.export_check.setToolTip("Auto-save results to CSV")
-
-        grid.addWidget(QLabel("Set Code:"), 0, 0)
+        self.color_by_combo.addItems(['None', 'Rarity', 'Set', 'WUBRG Colors'])
+        self.color_by_combo.setToolTip('Choose chart coloring')
+        self.export_check = QCheckBox('Export to CSV on run')
+        self.export_check.setToolTip('Auto-save results to CSV')
+        grid.addWidget(QLabel('Set Code:'), 0, 0)
         grid.addWidget(self.set_code_edit, 0, 1)
         grid.addWidget(self.subtract_owned_check, 1, 0, 1, 2)
         grid.addWidget(self.weighted_check, 2, 0, 1, 2)
-        grid.addWidget(QLabel("Weight Preset:"), 3, 0)
+        grid.addWidget(QLabel('Weight Preset:'), 3, 0)
         grid.addWidget(self.preset_combo, 3, 1)
         grid.addWidget(self.group_check, 4, 0, 1, 2)
-        grid.addWidget(QLabel("Min group total:"), 5, 0)
+        grid.addWidget(QLabel('Min group total:'), 5, 0)
         grid.addWidget(self.threshold_edit, 5, 1)
-        grid.addWidget(QLabel("Color Code By:"), 6, 0)
+        grid.addWidget(QLabel('Color Code By:'), 6, 0)
         grid.addWidget(self.color_by_combo, 6, 1)
-
-        spacer_label = QLabel("")
+        spacer_label = QLabel('')
         spacer_label.setMinimumHeight(10)
         grid.addWidget(spacer_label, 7, 0, 1, 2)
-
-        separator = QLabel("─" * 30)
-        separator.setStyleSheet("color: #666;")
+        separator = QLabel('' * 30)
+        separator.setStyleSheet('color: #666;')
         grid.addWidget(separator, 7, 0, 1, 2)
-
-        export_label = QLabel("Export Options:")
-        export_label.setStyleSheet(
-            "font-weight: bold; color: #00aaff; font-size: 12px;"
-        )
+        export_label = QLabel('Export Options:')
+        export_label.setStyleSheet('font-weight: bold; color: #00aaff; font-size: 12px;')
         grid.addWidget(export_label, 8, 0)
-
         grid.addWidget(self.export_check, 9, 0, 1, 2)
-
-        for widget in (
-            self.weighted_check,
-            self.group_check,
-            self.preset_combo,
-            self.threshold_edit,
-            self.color_by_combo,
-        ):
+        for widget in (self.weighted_check, self.group_check, self.preset_combo, self.threshold_edit, self.color_by_combo):
             if isinstance(widget, QCheckBox):
                 widget.stateChanged.connect(self.redraw_chart)
             elif isinstance(widget, QComboBox):
                 widget.currentTextChanged.connect(self.redraw_chart)
             elif isinstance(widget, QLineEdit):
                 widget.textChanged.connect(self.redraw_chart)
-
         layout.addLayout(grid)
         layout.addStretch()
-
-        self.run_button = QPushButton("Run Analysis")
-        self.run_button.setObjectName("AccentButton")
-        self.run_button.setToolTip("Start analysis (Ctrl+R)")
+        self.run_button = QPushButton('Run Analysis')
+        self.run_button.setObjectName('AccentButton')
+        self.run_button.setToolTip('Start analysis (Ctrl+R)')
         self.run_button.clicked.connect(self.run_analysis)
         layout.addWidget(self.run_button)
-
-        self.status_label = QLabel("Enter a set code to begin analysis.")
+        self.status_label = QLabel('Enter a set code to begin analysis.')
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
-
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
-
-        self.cancel_button = QPushButton("Cancel Analysis")
+        self.cancel_button = QPushButton('Cancel Analysis')
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self.cancel_analysis)
         layout.addWidget(self.cancel_button)
-
         self.results_summary = QTextEdit()
         self.results_summary.setMaximumHeight(100)
         self.results_summary.setVisible(False)
         self.results_summary.setReadOnly(True)
         layout.addWidget(self.results_summary)
-
         StatusAwareMixin.__init__(self)
         self._init_status_manager()
 
@@ -229,155 +136,86 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         if self.canvas:
             return
         import matplotlib
-
-        matplotlib.use("QtAgg")
+        matplotlib.use('QtAgg')
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-        from matplotlib.backends.backend_qtagg import (
-            NavigationToolbar2QT as NavigationToolbar,
-        )
+        from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
         from matplotlib.figure import Figure
-
-        # Create figure with dynamic sizing based on available space
-        # Get screen DPI for high-resolution displays
         try:
             screen_dpi = self.screen().logicalDotsPerInch()
-            fig_dpi = min(screen_dpi * 0.8, 100)  # Cap at 100 to prevent too-large figures
+            fig_dpi = min(screen_dpi * 0.8, 100)
         except:
             fig_dpi = 80
-
-        fig = Figure(facecolor="#2b2b2b", constrained_layout=False, dpi=fig_dpi)
-
+        fig = Figure(facecolor='#2b2b2b', constrained_layout=False, dpi=fig_dpi)
         self.canvas = FigureCanvas(fig)
         self.canvas.setMinimumSize(400, 300)
-
-        # Enable dynamic resizing
-        self.canvas.setSizePolicy(
-            self.canvas.sizePolicy().horizontalPolicy(),
-            self.canvas.sizePolicy().verticalPolicy()
-        )
+        self.canvas.setSizePolicy(self.canvas.sizePolicy().horizontalPolicy(), self.canvas.sizePolicy().verticalPolicy())
         self.canvas.updateGeometry()
         self.ax = self.canvas.figure.subplots()
-
-        self.ax.tick_params(colors="white")
+        self.ax.tick_params(colors='white')
         for spine in self.ax.spines.values():
-            spine.set_color("white")
-
+            spine.set_color('white')
         self.toolbar = NavigationToolbar(self.canvas, self)
-        self.toolbar.setObjectName("qt_toolbar_navigation")
-
-        # Add toolbar info label
+        self.toolbar.setObjectName('qt_toolbar_navigation')
         toolbar_layout = QHBoxLayout()
         toolbar_layout.addWidget(self.toolbar)
         toolbar_layout.addStretch()
-        zoom_hint = QLabel("💡 Use toolbar to pan/zoom")
-        zoom_hint.setStyleSheet("color: #888; font-size: 10px;")
+        zoom_hint = QLabel(' Use toolbar to pan/zoom')
+        zoom_hint.setStyleSheet('color: #888; font-size: 10px;')
         toolbar_layout.addWidget(zoom_hint)
-
         layout.addLayout(toolbar_layout)
         layout.addWidget(self.canvas, 1)
 
     def run_analysis(self):
         self._create_chart_area(self.chart_layout)
-
         set_input = self.set_code_edit.text().strip().lower()
         if not set_input:
-            QMessageBox.information(
-                self,
-                "Missing Set Code",
-                "Please enter a set code to analyze.\n\n"
-                "Examples: mh3, ltr, dmu, neo\n"
-                "Multiple sets: mh3,ltr,dmu",
-            )
+            QMessageBox.information(self, 'Missing Set Code', 'Please enter a set code to analyze.\n\nExamples: mh3, ltr, dmu, neo\nMultiple sets: mh3,ltr,dmu')
             self.set_code_edit.setFocus()
             return
-
-        set_codes = [code.strip() for code in set_input.split(",")]
+        set_codes = [code.strip() for code in set_input.split(',')]
         set_codes = [code for code in set_codes if code]
-
         if not set_codes:
-            QMessageBox.information(
-                self, "Invalid Set Codes", "Please enter valid set codes to analyze."
-            )
+            QMessageBox.information(self, 'Invalid Set Codes', 'Please enter valid set codes to analyze.')
             self.set_code_edit.setFocus()
             return
-
         invalid_codes = []
         for set_code in set_codes:
             if len(set_code) < 2 or len(set_code) > 6:
                 invalid_codes.append(set_code)
-
         if invalid_codes:
-            reply = QMessageBox.question(
-                self,
-                "Unusual Set Codes",
-                f"These set codes don't look typical: {', '.join(invalid_codes)}\n\n"
-                "Most set codes are 3-4 characters (e.g., 'mh3', 'ltr').\n\n"
-                "Do you want to continue anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
+            reply = QMessageBox.question(self, 'Unusual Set Codes', f"These set codes don't look typical: {', '.join(invalid_codes)}\n\nMost set codes are 3-4 characters (e.g., 'mh3', 'ltr').\n\nDo you want to continue anyway?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.No:
                 return
-
         try:
             threshold = float(self.threshold_edit.text())
             if threshold < 1:
-                QMessageBox.warning(
-                    self, "Invalid Threshold", "Minimum group total must be at least 1."
-                )
+                QMessageBox.warning(self, 'Invalid Threshold', 'Minimum group total must be at least 1.')
                 self.threshold_edit.setFocus()
                 return
         except ValueError:
-            QMessageBox.warning(
-                self,
-                "Invalid Number",
-                "Please enter a valid number for the minimum group total.",
-            )
+            QMessageBox.warning(self, 'Invalid Number', 'Please enter a valid number for the minimum group total.')
             self.threshold_edit.setFocus()
             return
-
         owned_cards = None
         if self.subtract_owned_check.isChecked():
             if not self.sorter_tab.all_cards:
-                reply = QMessageBox.question(
-                    self,
-                    "No Collection Loaded",
-                    "You've chosen to subtract owned cards, but no collection is loaded in the Sorter tab.\n\n"
-                    "Do you want to:\n"
-                    "• Continue without subtracting owned cards, or\n"
-                    "• Cancel and load a collection first?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Cancel,
-                )
+                reply = QMessageBox.question(self, 'No Collection Loaded', "You've chosen to subtract owned cards, but no collection is loaded in the Sorter tab.\n\nDo you want to:\n• Continue without subtracting owned cards, or\n• Cancel and load a collection first?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
                 if reply == QMessageBox.StandardButton.Cancel:
                     return
                 else:
                     self.subtract_owned_check.setChecked(False)
             else:
                 owned_cards = self.sorter_tab.all_cards
-
-        self.options = {
-            "set_codes": set_codes,
-            "weighted": self.weighted_check.isChecked(),
-            "preset": self.preset_combo.currentText(),
-            "group": self.group_check.isChecked(),
-            "threshold": threshold,
-            "owned_cards": owned_cards,
-        }
-
+        self.options = {'set_codes': set_codes, 'weighted': self.weighted_check.isChecked(), 'preset': self.preset_combo.currentText(), 'group': self.group_check.isChecked(), 'threshold': threshold, 'owned_cards': owned_cards}
         if self.export_check.isChecked():
             if len(set_codes) == 1:
-                filename = f"{set_codes[0]}_analysis.csv"
+                filename = f'{set_codes[0]}_analysis.csv'
             else:
-                filename = f"combined_{len(set_codes)}_sets_analysis.csv"
-
-            filepath, _ = QFileDialog.getSaveFileName(
-                self, "Save Analysis CSV", filename, "CSV Files (*.csv);All Files (*.*)"
-            )
+                filename = f'combined_{len(set_codes)}_sets_analysis.csv'
+            filepath, _ = QFileDialog.getSaveFileName(self, 'Save Analysis CSV', filename, 'CSV Files (*.csv);All Files (*.*)')
             if not filepath:
                 return
-            self.options["export_path"] = filepath
-
+            self.options['export_path'] = filepath
         self._start_analysis()
 
     def _start_analysis(self):
@@ -386,36 +224,26 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         self.results_summary.setVisible(False)
-
-        set_codes = self.options["set_codes"]
+        set_codes = self.options['set_codes']
         if len(set_codes) == 1:
             set_display = set_codes[0].upper()
-            self.show_status_message(
-                f"Starting analysis for '{set_display}'...", style="info"
-            )
-            self.operation_started.emit(f"Analyzing set {set_display}", 0)
+            self.show_status_message(f"Starting analysis for '{set_display}'...", style='info')
+            self.operation_started.emit(f'Analyzing set {set_display}', 0)
         else:
-            set_display = ", ".join(code.upper() for code in set_codes)
-            self.show_status_message(
-                f"Starting analysis for {len(set_codes)} sets: {set_display}...",
-                style="info",
-            )
-            self.operation_started.emit(f"Analyzing {len(set_codes)} sets", 0)
-
+            set_display = ', '.join((code.upper() for code in set_codes))
+            self.show_status_message(f'Starting analysis for {len(set_codes)} sets: {set_display}...', style='info')
+            self.operation_started.emit(f'Analyzing {len(set_codes)} sets', 0)
         self.analysis_thread = QThread()
         self.analysis_worker = SetAnalysisWorker(self.options, self.api)
         self.analysis_worker.moveToThread(self.analysis_thread)
-
         self.analysis_thread.started.connect(self.analysis_worker.process)
         self.analysis_worker.finished.connect(self.on_analysis_finished)
         self.analysis_worker.error.connect(self.on_analysis_error)
         self.analysis_worker.progress.connect(self.on_analysis_progress)
         self.analysis_worker.status_update.connect(self.on_status_update)
-
         self.analysis_worker.finished.connect(self.analysis_thread.quit)
         self.analysis_worker.finished.connect(self.analysis_worker.deleteLater)
         self.analysis_thread.finished.connect(self.analysis_thread.deleteLater)
-
         self.analysis_thread.start()
 
     def on_analysis_progress(self, current: int, total: int):
@@ -425,84 +253,59 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             self.progress_updated.emit(current)
 
     def on_status_update(self, message: str):
-        self.show_status_message(message, style="info")
+        self.show_status_message(message, style='info')
 
     def cancel_analysis(self):
         self.worker_manager.cleanup_all()
-
         if self.analysis_thread and self.analysis_thread.isRunning():
             from workers.threads import cleanup_worker_thread
-
             cleanup_worker_thread(self.analysis_thread, self.analysis_worker)
-
         self._reset_ui_state()
-        self.show_status_message("Analysis cancelled.", style="warning")
+        self.show_status_message('Analysis cancelled.', style='warning')
         self.operation_finished.emit()
 
     def on_analysis_finished(self, result):
-        set_codes = result.get("set_codes", [result.get("set_code", "")])
+        set_codes = result.get('set_codes', [result.get('set_code', '')])
         if len(set_codes) == 1:
             set_code_str = f"'{set_codes[0].upper()}'"
         else:
-            set_code_str = f"{len(set_codes)} sets: {', '.join(code.upper() for code in set_codes)}"
-
-        summary_parts = [f"Analysis completed for {set_code_str}"]
-
-        if "missing_count" in result:
-            owned = result.get("owned_count", 0)
-            missing = result.get("missing_count", 0)
-            total = result.get("original_set_size", owned + missing)
-            summary_parts.append(f"Set contains {total} cards total")
-            summary_parts.append(f"You own {owned} cards ({owned / total * 100:.1f}%)")
-            summary_parts.append(
-                f"Missing {missing} cards ({missing / total * 100:.1f}%)"
-            )
-            set_code_str += " (Missing Cards Only)"
+            set_code_str = f"{len(set_codes)} sets: {', '.join((code.upper() for code in set_codes))}"
+        summary_parts = [f'Analysis completed for {set_code_str}']
+        if 'missing_count' in result:
+            owned = result.get('owned_count', 0)
+            missing = result.get('missing_count', 0)
+            total = result.get('original_set_size', owned + missing)
+            summary_parts.append(f'Set contains {total} cards total')
+            summary_parts.append(f'You own {owned} cards ({owned / total * 100:.1f}%)')
+            summary_parts.append(f'Missing {missing} cards ({missing / total * 100:.1f}%)')
+            set_code_str += ' (Missing Cards Only)'
         else:
-            total = result.get("total_cards_analyzed", 0)
-            summary_parts.append(f"Analyzed {total} cards")
-
-        if result["weighted"]:
-            summary_parts.append(
-                "Weighted analysis using " + self.options["preset"] + " preset"
-            )
-
-        summary_text = "\n".join(summary_parts)
-
-        self.show_status_message(
-            f"Analysis complete for {set_code_str}", style="success"
-        )
+            total = result.get('total_cards_analyzed', 0)
+            summary_parts.append(f'Analyzed {total} cards')
+        if result['weighted']:
+            summary_parts.append('Weighted analysis using ' + self.options['preset'] + ' preset')
+        summary_text = '\n'.join(summary_parts)
+        self.show_status_message(f'Analysis complete for {set_code_str}', style='success')
         self.results_summary.setText(summary_text)
         self.results_summary.setVisible(True)
-
         self._reset_ui_state()
         self.last_analysis_data = result
-
-        if hasattr(self.analysis_worker, "raw_cards"):
+        if hasattr(self.analysis_worker, 'raw_cards'):
             self.last_analysis_cards = self.analysis_worker.raw_cards
         else:
             self.last_analysis_cards = []
-
         self.redraw_chart()
-
-        if export_path := self.analysis_worker.options.get("export_path"):
+        if (export_path := self.analysis_worker.options.get('export_path')):
             self._export_results(export_path, result)
-
         self.operation_finished.emit()
 
     def on_analysis_error(self, error_message: str):
-        self.show_status_message("Analysis failed - see details below", style="error")
+        self.show_status_message('Analysis failed - see details below', style='error')
         self._reset_ui_state()
-
-        self.results_summary.setText(f"Error: {error_message}")
+        self.results_summary.setText(f'Error: {error_message}')
         self.results_summary.setVisible(True)
-
-        if any(
-            term in error_message.lower()
-            for term in ["not found", "invalid", "connection"]
-        ):
-            QMessageBox.warning(self, "Analysis Failed", error_message)
-
+        if any((term in error_message.lower() for term in ['not found', 'invalid', 'connection'])):
+            QMessageBox.warning(self, 'Analysis Failed', error_message)
         self.operation_finished.emit()
 
     def _reset_ui_state(self):
@@ -512,69 +315,36 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
 
     def _export_results(self, export_path: str, result: dict):
         try:
-            if not result["sorted_groups"]:
-                QMessageBox.information(self, "Export Info", "No data to export.")
+            if not result['sorted_groups']:
+                QMessageBox.information(self, 'Export Info', 'No data to export.')
                 return
-
-            if (
-                self.color_by_combo.currentText() == "WUBRG Colors"
-                and hasattr(self, "last_analysis_cards")
-                and self.last_analysis_cards
-            ):
+            if self.color_by_combo.currentText() == 'WUBRG Colors' and hasattr(self, 'last_analysis_cards') and self.last_analysis_cards:
                 self._export_wubrg_to_csv(export_path, result)
             else:
-                weighted = result["weighted"]
-                flat_results = [
-                    (group, data["total_weighted" if weighted else "total_raw"])
-                    for group, data in result["sorted_groups"]
-                ]
-
-                with open(export_path, "w", newline="", encoding="utf-8") as f:
+                weighted = result['weighted']
+                flat_results = [(group, data['total_weighted' if weighted else 'total_raw']) for group, data in result['sorted_groups']]
+                with open(export_path, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Letter Group", "Count"])
+                    writer.writerow(['Letter Group', 'Count'])
                     writer.writerows(flat_results)
-
-            QMessageBox.information(
-                self,
-                "Export Successful",
-                f"Analysis results exported to:\n{export_path}",
-            )
-
+            QMessageBox.information(self, 'Export Successful', f'Analysis results exported to:\n{export_path}')
         except PermissionError:
-            QMessageBox.critical(
-                self,
-                "Export Failed",
-                f"Cannot write to '{export_path}'.\n\n"
-                "The file may be open in another program or you may not have write permissions.",
-            )
+            QMessageBox.critical(self, 'Export Failed', f"Cannot write to '{export_path}'.\n\nThe file may be open in another program or you may not have write permissions.")
         except Exception as e:
-            QMessageBox.critical(
-                self, "Export Error", f"Failed to export results:\n\n{str(e)}"
-            )
+            QMessageBox.critical(self, 'Export Error', f'Failed to export results:\n\n{str(e)}')
 
     def _export_wubrg_to_csv(self, filepath: str, result: dict):
         try:
-            wubrg_colors = {
-                "W": {"name": "White", "color": "#f0f0f0"},
-                "U": {"name": "Blue", "color": "#007acc"},
-                "B": {"name": "Black", "color": "#808080"},
-                "R": {"name": "Red", "color": "#cc0000"},
-                "G": {"name": "Green", "color": "#00cc66"},
-            }
-
-            # Extract letter grouping mapping
+            wubrg_colors = {'W': {'name': 'White', 'color': '#f0f0f0'}, 'U': {'name': 'Blue', 'color': '#007acc'}, 'B': {'name': 'Black', 'color': '#808080'}, 'R': {'name': 'Red', 'color': '#cc0000'}, 'G': {'name': 'Green', 'color': '#00cc66'}}
             letter_mapping = self._extract_letter_grouping_from_data(result)
-
             single_color_groups: dict = {color: [] for color in wubrg_colors.keys()}
             multicolor_cards = []
             colorless_cards = []
             land_cards = []
-
             for card_data in self.last_analysis_cards:
-                color_identity = card_data.get("color_identity", [])
-                card_type = card_data.get("type_line", "").lower()
-
-                if "land" in card_type:
+                color_identity = card_data.get('color_identity', [])
+                card_type = card_data.get('type_line', '').lower()
+                if 'land' in card_type:
                     land_cards.append(card_data)
                 elif not color_identity:
                     colorless_cards.append(card_data)
@@ -582,334 +352,173 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     single_color_groups[color_identity[0]].append(card_data)
                 else:
                     multicolor_cards.append(card_data)
-
-            with open(filepath, "w", newline="", encoding="utf-8") as f:
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                writer.writerow(
-                    ["Color Category", "Color Hex", "Letter", "Count", "Percentage"]
-                )
-
+                writer.writerow(['Color Category', 'Color Hex', 'Letter', 'Count', 'Percentage'])
                 all_categories = []
-
                 for color_code, color_info in wubrg_colors.items():
                     if single_color_groups[color_code]:
-                        all_categories.append(
-                            (
-                                color_info["name"],
-                                color_info["color"],
-                                single_color_groups[color_code],
-                            )
-                        )
-
+                        all_categories.append((color_info['name'], color_info['color'], single_color_groups[color_code]))
                 if multicolor_cards:
-                    all_categories.append(("Multicolor", "#ff6600", multicolor_cards))
-
+                    all_categories.append(('Multicolor', '#ff6600', multicolor_cards))
                 if colorless_cards:
-                    all_categories.append(("Colorless", "#9a9a9a", colorless_cards))
-
+                    all_categories.append(('Colorless', '#9a9a9a', colorless_cards))
                 if land_cards:
-                    all_categories.append(("Lands", "#8b4513", land_cards))
-
+                    all_categories.append(('Lands', '#8b4513', land_cards))
                 for category_name, color_hex, cards in all_categories:
                     letter_counts = {}
                     for card_data in cards:
-                        card_name = card_data.get("name", "")
+                        card_name = card_data.get('name', '')
                         if not card_name:
                             continue
                         first_letter = card_name[0].upper()
-                        # Apply letter grouping if mapping exists
                         grouped_letter = letter_mapping.get(first_letter, first_letter)
                         if grouped_letter not in letter_counts:
                             letter_counts[grouped_letter] = 0
                         letter_counts[grouped_letter] += 1
-
-                    sorted_letters = sorted(
-                        letter_counts.items(), key=lambda x: x[1], reverse=True
-                    )
-                    total_cards = sum(count for _, count in sorted_letters)
-
+                    sorted_letters = sorted(letter_counts.items(), key=lambda x: x[1], reverse=True)
+                    total_cards = sum((count for _, count in sorted_letters))
                     for letter, count in sorted_letters:
-                        percentage = (
-                            (count / total_cards * 100) if total_cards > 0 else 0
-                        )
-                        writer.writerow(
-                            [
-                                category_name,
-                                color_hex,
-                                letter,
-                                count,
-                                f"{percentage:.1f}%",
-                            ]
-                        )
-
+                        percentage = count / total_cards * 100 if total_cards > 0 else 0
+                        writer.writerow([category_name, color_hex, letter, count, f'{percentage:.1f}%'])
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "WUBRG Export Error",
-                f"Failed to export WUBRG results:\n\n{str(e)}",
-            )
+            QMessageBox.critical(self, 'WUBRG Export Error', f'Failed to export WUBRG results:\n\n{str(e)}')
 
     def redraw_chart(self):
         if self.last_analysis_data is None:
             return
-
         if not self.ax:
             return
-
         self.ax.clear()
         data = self.last_analysis_data
-
-        if not data["sorted_groups"]:
-            self.ax.text(
-                0.5,
-                0.5,
-                "No cards to display.\n(You might own the entire set!)",
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=12,
-                transform=self.ax.transAxes,
-            )
-            set_codes = data.get("set_codes", [data.get("set_code", "")])
+        if not data['sorted_groups']:
+            self.ax.text(0.5, 0.5, 'No cards to display.\n(You might own the entire set!)', ha='center', va='center', color='white', fontsize=12, transform=self.ax.transAxes)
+            set_codes = data.get('set_codes', [data.get('set_code', '')])
             if len(set_codes) == 1:
-                title = f"Card Distribution for Set: {set_codes[0].upper()}"
+                title = f'Card Distribution for Set: {set_codes[0].upper()}'
             else:
-                title = f"Card Distribution for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
-            if "missing_count" in data:
-                title += " (Missing Cards)"
-            self.ax.set_title(title, color="white")
+                title = f"Card Distribution for {len(set_codes)} Sets: {', '.join((code.upper() for code in set_codes))}"
+            if 'missing_count' in data:
+                title += ' (Missing Cards)'
+            self.ax.set_title(title, color='white')
             self.canvas.draw()
             self.canvas.flush_events()
             if self.toolbar:
                 self.toolbar.update()
             return
-
         color_mode = self.color_by_combo.currentText()
-        labels = [item[0] for item in data["sorted_groups"]]
-
-        if color_mode == "None":
-            values = [
-                item[1]["total_weighted" if data["weighted"] else "total_raw"]
-                for item in data["sorted_groups"]
-            ]
-            bars = self.ax.bar(labels, values, color="#007acc")
-
+        labels = [item[0] for item in data['sorted_groups']]
+        if color_mode == 'None':
+            values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
+            bars = self.ax.bar(labels, values, color='#007acc')
             for bar, value in zip(bars, values):
                 if value > 0:
-                    self.ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + max(values) * 0.01,
-                        str(int(value)),
-                        ha="center",
-                        va="bottom",
-                        color="white",
-                        fontsize=8,
-                    )
-        elif color_mode == "WUBRG Colors":
+                    self.ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(int(value)), ha='center', va='bottom', color='white', fontsize=8)
+        elif color_mode == 'WUBRG Colors':
             self._create_wubrg_charts(data)
             return
-        elif color_mode == "Set":
+        elif color_mode == 'Set':
             self._create_set_colored_chart(data, labels)
         else:
             all_rarities = sorted(list(self.RARITY_COLORS.keys()))
             bottoms = {label: 0 for label in labels}
-
             for rarity in all_rarities:
-                values = [
-                    item[1]["rarity"].get(rarity, 0) for item in data["sorted_groups"]
-                ]
-                bars = self.ax.bar(
-                    labels,
-                    values,
-                    bottom=[bottoms[label] for label in labels],
-                    color=self.RARITY_COLORS.get(rarity, "#ffffff"),
-                    label=rarity.title(),
-                )
-
+                values = [item[1]['rarity'].get(rarity, 0) for item in data['sorted_groups']]
+                bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels], color=self.RARITY_COLORS.get(rarity, '#ffffff'), label=rarity.title())
                 for i, label in enumerate(labels):
                     bottoms[label] += values[i]
-
-            self.ax.legend(
-                labelcolor="white",
-                facecolor="#3c3f41",
-                edgecolor="#555",
-                loc="upper right",
-            )
-
-        set_codes = data.get("set_codes", [data.get("set_code", "")])
+            self.ax.legend(labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
+        set_codes = data.get('set_codes', [data.get('set_code', '')])
         if len(set_codes) == 1:
-            title = f"Card Distribution for Set: {set_codes[0].upper()}"
+            title = f'Card Distribution for Set: {set_codes[0].upper()}'
         else:
-            title = f"Card Distribution for {len(set_codes)} Sets: {', '.join(code.upper() for code in set_codes)}"
-        if "missing_count" in data:
-            title += " (Missing Cards Only)"
-
-        self.ax.set_title(title, color="white", fontsize=12, pad=20)
-
-        ylabel = "Count"
-        if data["weighted"]:
+            title = f"Card Distribution for {len(set_codes)} Sets: {', '.join((code.upper() for code in set_codes))}"
+        if 'missing_count' in data:
+            title += ' (Missing Cards Only)'
+        self.ax.set_title(title, color='white', fontsize=12, pad=20)
+        ylabel = 'Count'
+        if data['weighted']:
             ylabel = f"Weighted Score ({self.options.get('preset', 'default')} preset)"
-        self.ax.set_ylabel(ylabel, color="white")
-
-        self.ax.tick_params(colors="white")
+        self.ax.set_ylabel(ylabel, color='white')
+        self.ax.tick_params(colors='white')
         for spine in self.ax.spines.values():
-            spine.set_color("white")
-
+            spine.set_color('white')
         if len(labels) > 10:
-            self.ax.tick_params(axis="x", rotation=45)
-
+            self.ax.tick_params(axis='x', rotation=45)
         self.canvas.figure.tight_layout()
         self.canvas.draw()
         self.canvas.flush_events()
-
-        # Update toolbar
         if self.toolbar:
             self.toolbar.update()
 
     def _create_set_colored_chart(self, data, labels):
-        set_codes = data.get("set_codes", [])
-
+        set_codes = data.get('set_codes', [])
         if len(set_codes) <= 1:
-            values = [
-                item[1]["total_weighted" if data["weighted"] else "total_raw"]
-                for item in data["sorted_groups"]
-            ]
+            values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
             bars = self.ax.bar(labels, values, color=self.SET_COLORS[0])
-
             for bar, value in zip(bars, values):
                 if value > 0:
-                    self.ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + max(values) * 0.01,
-                        str(int(value)),
-                        ha="center",
-                        va="bottom",
-                        color="white",
-                        fontsize=8,
-                    )
+                    self.ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(int(value)), ha='center', va='bottom', color='white', fontsize=8)
             return
-
-        set_colors = {
-            set_code: self.SET_COLORS[i % len(self.SET_COLORS)]
-            for i, set_code in enumerate(set_codes)
-        }
-
+        set_colors = {set_code: self.SET_COLORS[i % len(self.SET_COLORS)] for i, set_code in enumerate(set_codes)}
         bottoms = {label: 0 for label in labels}
         legend_handles = []
-
         for set_code in set_codes:
             values = []
-            for item in data["sorted_groups"]:
-                set_breakdown = item[1].get("set_breakdown", {})
+            for item in data['sorted_groups']:
+                set_breakdown = item[1].get('set_breakdown', {})
                 values.append(set_breakdown.get(set_code, 0))
-
-            if any(v > 0 for v in values):
-                bars = self.ax.bar(
-                    labels,
-                    values,
-                    bottom=[bottoms[label] for label in labels],
-                    color=set_colors[set_code],
-                    label=set_code.upper(),
-                )
-
+            if any((v > 0 for v in values)):
+                bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels], color=set_colors[set_code], label=set_code.upper())
                 for i, label in enumerate(labels):
                     bottoms[label] += values[i]
-
                 if bars:
                     legend_handles.append(bars[0])
-
         if legend_handles:
-            self.ax.legend(
-                handles=legend_handles,
-                labels=[
-                    set_code.upper()
-                    for set_code in set_codes
-                    if any(
-                        item[1].get("set_breakdown", {}).get(set_code, 0) > 0
-                        for item in data["sorted_groups"]
-                    )
-                ],
-                labelcolor="white",
-                facecolor="#3c3f41",
-                edgecolor="#555",
-                loc="upper right",
-            )
+            self.ax.legend(handles=legend_handles, labels=[set_code.upper() for set_code in set_codes if any((item[1].get('set_breakdown', {}).get(set_code, 0) > 0 for item in data['sorted_groups']))], labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
 
     def _extract_letter_grouping_from_data(self, data):
-        """Extract letter-to-group mapping from sorted_groups data"""
         letter_mapping = {}
-
-        if not data.get("sorted_groups"):
+        if not data.get('sorted_groups'):
             return letter_mapping
-
-        for group_name, group_data in data["sorted_groups"]:
-            # Check if this is a grouped entry
-            if group_name.startswith("(") and group_name.endswith(")"):
-                # New format: "(ABC)"
-                letters = group_name[1:-1]  # Remove parentheses
+        for group_name, group_data in data['sorted_groups']:
+            if group_name.startswith('(') and group_name.endswith(')'):
+                letters = group_name[1:-1]
                 for letter in letters:
                     letter_mapping[letter] = group_name
-            elif group_name.startswith("Group ") and "(" in group_name:
-                # Old format: "Group 1 (ABC)" - for backward compatibility
-                letters = group_name.split("(")[1].rstrip(")")
+            elif group_name.startswith('Group ') and '(' in group_name:
+                letters = group_name.split('(')[1].rstrip(')')
                 for letter in letters:
                     letter_mapping[letter] = group_name
-            elif len(group_name) > 1 and all(c.isalpha() for c in group_name):
-                # Handle multi-letter groups like "XYZ" (legacy format)
+            elif len(group_name) > 1 and all((c.isalpha() for c in group_name)):
                 for letter in group_name:
                     letter_mapping[letter] = group_name
             else:
-                # Single letter, maps to itself
                 letter_mapping[group_name] = group_name
-
         return letter_mapping
 
     def _create_wubrg_charts(self, data):
-        # Create WUBRG subgraphs with proper layout handling
         self._create_wubrg_charts_impl(data)
 
     def _create_wubrg_charts_impl(self, data):
-        wubrg_colors = {
-            "W": {"name": "White", "color": "#f0f0f0"},
-            "U": {"name": "Blue", "color": "#007acc"},
-            "B": {"name": "Black", "color": "#808080"},
-            "R": {"name": "Red", "color": "#cc0000"},
-            "G": {"name": "Green", "color": "#00cc66"},
-        }
-
+        wubrg_colors = {'W': {'name': 'White', 'color': '#f0f0f0'}, 'U': {'name': 'Blue', 'color': '#007acc'}, 'B': {'name': 'Black', 'color': '#808080'}, 'R': {'name': 'Red', 'color': '#cc0000'}, 'G': {'name': 'Green', 'color': '#00cc66'}}
         self.ax.clear()
-
-        if not hasattr(self, "last_analysis_cards") or not self.last_analysis_cards:
-            self.ax.text(
-                0.5,
-                0.5,
-                "WUBRG analysis requires card data.\nPlease re-run the analysis.",
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=14,
-                weight='bold',
-                transform=self.ax.transAxes,
-            )
+        if not hasattr(self, 'last_analysis_cards') or not self.last_analysis_cards:
+            self.ax.text(0.5, 0.5, 'WUBRG analysis requires card data.\nPlease re-run the analysis.', ha='center', va='center', color='white', fontsize=14, weight='bold', transform=self.ax.transAxes)
             self.canvas.draw()
             self.canvas.flush_events()
             if self.toolbar:
                 self.toolbar.update()
             return
-
-        # Extract letter grouping mapping from sorted_groups if grouping is enabled
         letter_mapping = self._extract_letter_grouping_from_data(data)
-
         single_color_groups = {color: [] for color in wubrg_colors.keys()}
         multicolor_cards = []
         colorless_cards = []
         land_cards = []
-
         for card_data in self.last_analysis_cards:
-            color_identity = card_data.get("color_identity", [])
-            card_type = card_data.get("type_line", "").lower()
-
-            if "land" in card_type:
+            color_identity = card_data.get('color_identity', [])
+            card_type = card_data.get('type_line', '').lower()
+            if 'land' in card_type:
                 land_cards.append(card_data)
             elif not color_identity:
                 colorless_cards.append(card_data)
@@ -917,254 +526,132 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 single_color_groups[color_identity[0]].append(card_data)
             else:
                 multicolor_cards.append(card_data)
-
         fig = self.canvas.figure
         fig.clear()
-
         charts_to_create = []
-
         for color_code, color_info in wubrg_colors.items():
             if single_color_groups[color_code]:
-                charts_to_create.append(
-                    ("single", color_code, color_info, single_color_groups[color_code])
-                )
-
+                charts_to_create.append(('single', color_code, color_info, single_color_groups[color_code]))
         if multicolor_cards:
-            charts_to_create.append(
-                (
-                    "multicolor",
-                    None,
-                    {"name": "Multicolor", "color": "#ff6600"},
-                    multicolor_cards,
-                )
-            )
-
+            charts_to_create.append(('multicolor', None, {'name': 'Multicolor', 'color': '#ff6600'}, multicolor_cards))
         if colorless_cards:
-            charts_to_create.append(
-                (
-                    "colorless",
-                    None,
-                    {"name": "Colorless", "color": "#9a9a9a"},
-                    colorless_cards,
-                )
-            )
-
+            charts_to_create.append(('colorless', None, {'name': 'Colorless', 'color': '#9a9a9a'}, colorless_cards))
         if land_cards:
-            charts_to_create.append(
-                ("lands", None, {"name": "Lands", "color": "#8b4513"}, land_cards)
-            )
-
+            charts_to_create.append(('lands', None, {'name': 'Lands', 'color': '#8b4513'}, land_cards))
         if not charts_to_create:
-            self.ax.text(
-                0.5,
-                0.5,
-                "No cards to display in WUBRG analysis.",
-                ha="center",
-                va="center",
-                color="white",
-                fontsize=14,
-                weight='bold',
-                transform=self.ax.transAxes,
-            )
+            self.ax.text(0.5, 0.5, 'No cards to display in WUBRG analysis.', ha='center', va='center', color='white', fontsize=14, weight='bold', transform=self.ax.transAxes)
             self.canvas.draw()
             self.canvas.flush_events()
             if self.toolbar:
                 self.toolbar.update()
             return
-
         num_charts = len(charts_to_create)
         if num_charts <= 4:
-            rows, cols = 2, 2
+            rows, cols = (2, 2)
         elif num_charts <= 6:
-            rows, cols = 2, 3
+            rows, cols = (2, 3)
         elif num_charts <= 9:
-            rows, cols = 3, 3
+            rows, cols = (3, 3)
         else:
-            rows, cols = 4, 3
-
-        # Increased spacing to prevent label overlap and title clipping
-        # Larger bottom margin for bigger fonts
-        gs = fig.add_gridspec(rows, cols, hspace=0.90, wspace=0.50, bottom=0.18, top=0.84)
-
-        for i, (chart_type, color_code, color_info, cards) in enumerate(
-            charts_to_create
-        ):
+            rows, cols = (4, 3)
+        gs = fig.add_gridspec(rows, cols, hspace=0.9, wspace=0.5, bottom=0.18, top=0.84)
+        for i, (chart_type, color_code, color_info, cards) in enumerate(charts_to_create):
             if i >= rows * cols:
                 break
-
             row = i // cols
             col = i % cols
             ax = fig.add_subplot(gs[row, col])
-
             letter_counts = {}
             for card_data in cards:
-                card_name = card_data.get("name", "")
+                card_name = card_data.get('name', '')
                 if not card_name:
                     continue
-
                 first_letter = card_name[0].upper()
-                # Apply letter grouping if mapping exists
                 grouped_letter = letter_mapping.get(first_letter, first_letter)
                 if grouped_letter not in letter_counts:
                     letter_counts[grouped_letter] = 0
                 letter_counts[grouped_letter] += 1
-
             if not letter_counts:
-                ax.text(
-                    0.5,
-                    0.5,
-                    f"No valid {color_info['name']} card names",
-                    ha="center",
-                    va="center",
-                    color="white",
-                    fontsize=11,
-                    weight='bold',
-                    transform=ax.transAxes,
-                )
-                ax.set_title(f"{color_info['name']} Cards", color="white", fontsize=14, pad=10, weight='bold')
-                ax.set_facecolor("#2b2b2b")
+                ax.text(0.5, 0.5, f"No valid {color_info['name']} card names", ha='center', va='center', color='white', fontsize=11, weight='bold', transform=ax.transAxes)
+                ax.set_title(f"{color_info['name']} Cards", color='white', fontsize=14, pad=10, weight='bold')
+                ax.set_facecolor('#2b2b2b')
                 continue
-
-            sorted_letters = sorted(
-                letter_counts.items(), key=lambda x: x[1], reverse=True
-            )
+            sorted_letters = sorted(letter_counts.items(), key=lambda x: x[1], reverse=True)
             letters, counts = zip(*sorted_letters)
-
-            bars = ax.bar(letters, counts, color=color_info["color"])
-
+            bars = ax.bar(letters, counts, color=color_info['color'])
             for bar, count in zip(bars, counts):
                 if count > 0:
-                    ax.text(
-                        bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() + max(counts) * 0.01,
-                        str(count),
-                        ha="center",
-                        va="bottom",
-                        color="white",
-                        fontsize=10,
-                        weight='bold',
-                    )
-
-            ax.set_title(
-                f"{color_info['name']} ({len(cards)})",
-                color="white",
-                fontsize=14,
-                pad=10,
-                weight='bold',
-            )
-            ax.set_ylabel("Count", color="white", fontsize=11, weight='bold')
-            ax.set_facecolor("#2b2b2b")
-
-            # Set y-axis tick label size
-            ax.tick_params(axis="y", labelsize=10, colors="white")
+                    ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(counts) * 0.01, str(count), ha='center', va='bottom', color='white', fontsize=10, weight='bold')
+            ax.set_title(f"{color_info['name']} ({len(cards)})", color='white', fontsize=14, pad=10, weight='bold')
+            ax.set_ylabel('Count', color='white', fontsize=11, weight='bold')
+            ax.set_facecolor('#2b2b2b')
+            ax.tick_params(axis='y', labelsize=10, colors='white')
             for label in ax.get_yticklabels():
                 label.set_fontweight('bold')
-
-            # Improved x-axis label handling to prevent overlap
             if len(letters) > 15:
-                # Many entries: smaller font with 45° rotation
-                ax.tick_params(axis="x", rotation=45, labelsize=9, colors="white", pad=3)
+                ax.tick_params(axis='x', rotation=45, labelsize=9, colors='white', pad=3)
                 for label in ax.get_xticklabels():
                     label.set_ha('right')
                     label.set_va('top')
                     label.set_fontweight('bold')
             elif len(letters) > 10:
-                # Moderate entries: 45° rotation with readable font
-                ax.tick_params(axis="x", rotation=45, labelsize=10, colors="white", pad=3)
+                ax.tick_params(axis='x', rotation=45, labelsize=10, colors='white', pad=3)
                 for label in ax.get_xticklabels():
                     label.set_ha('right')
                     label.set_va('top')
                     label.set_fontweight('bold')
             elif len(letters) > 6:
-                # Few-moderate entries: 45° rotation
-                ax.tick_params(axis="x", rotation=45, labelsize=11, colors="white", pad=3)
+                ax.tick_params(axis='x', rotation=45, labelsize=11, colors='white', pad=3)
                 for label in ax.get_xticklabels():
                     label.set_ha('right')
                     label.set_va('top')
                     label.set_fontweight('bold')
             else:
-                # Few entries: horizontal labels
-                ax.tick_params(colors="white", labelsize=11)
+                ax.tick_params(colors='white', labelsize=11)
                 for label in ax.get_xticklabels():
                     label.set_fontweight('bold')
-
             for spine in ax.spines.values():
-                spine.set_color("white")
+                spine.set_color('white')
                 spine.set_linewidth(1.5)
-
-        set_codes = data.get("set_codes", [data.get("set_code", "")])
+        set_codes = data.get('set_codes', [data.get('set_code', '')])
         if len(set_codes) == 1:
-            title = f"WUBRG Analysis: {set_codes[0].upper()}"
+            title = f'WUBRG Analysis: {set_codes[0].upper()}'
         else:
-            title = f"WUBRG Analysis: {len(set_codes)} Sets ({', '.join(code.upper() for code in set_codes)})"
-        if "missing_count" in data:
-            title += " - Missing Only"
-
-        fig.suptitle(title, color="white", fontsize=16, y=0.96, weight='bold')
-
-        # Apply tight_layout with rect to leave room for suptitle
-        # rect=[left, bottom, right, top] in figure coordinates
-        fig.tight_layout(rect=[0, 0, 1, 0.85])
-
-        # Update canvas and ensure toolbar is in sync
+            title = f"WUBRG Analysis: {len(set_codes)} Sets ({', '.join((code.upper() for code in set_codes))})"
+        if 'missing_count' in data:
+            title += ' - Missing Only'
+        fig.suptitle(title, color='white', fontsize=16, y=0.96, weight='bold')
         self.canvas.draw()
         self.canvas.flush_events()
-
-        # Enable toolbar navigation for subplots
         if self.toolbar:
             self.toolbar.update()
-            # Force toolbar to recognize all subplot axes
             self.canvas.figure.canvas.toolbar = self.toolbar
-
-        if (
-            hasattr(self, "last_analysis_cards")
-            and self.last_analysis_cards
-            and self.color_by_combo.currentText() == "WUBRG Colors"
-        ):
+        if hasattr(self, 'last_analysis_cards') and self.last_analysis_cards and (self.color_by_combo.currentText() == 'WUBRG Colors'):
             self._add_wubrg_export_buttons()
 
     def _export_wubrg_results(self, result):
         try:
-            if not hasattr(self, "last_analysis_cards") or not self.last_analysis_cards:
-                QMessageBox.information(self, "Export Info", "No WUBRG data to export.")
+            if not hasattr(self, 'last_analysis_cards') or not self.last_analysis_cards:
+                QMessageBox.information(self, 'Export Info', 'No WUBRG data to export.')
                 return
-
-            # Get set codes for filename
-            set_codes = result.get("set_codes", [result.get("set_code", "")])
+            set_codes = result.get('set_codes', [result.get('set_code', '')])
             if len(set_codes) == 1:
-                base_filename = f"{set_codes[0]}_wubrg"
+                base_filename = f'{set_codes[0]}_wubrg'
             else:
-                base_filename = f"combined_{len(set_codes)}_sets_wubrg"
-
-            # Ask user for export directory
-            export_dir = QFileDialog.getExistingDirectory(
-                self, "Select Directory for WUBRG Export", ""
-            )
+                base_filename = f'combined_{len(set_codes)}_sets_wubrg'
+            export_dir = QFileDialog.getExistingDirectory(self, 'Select Directory for WUBRG Export', '')
             if not export_dir:
                 return
-
-            # Extract letter grouping mapping
             letter_mapping = self._extract_letter_grouping_from_data(result)
-
-            # Categorize cards
-            wubrg_colors = {
-                "W": {"name": "White", "color": "#f0f0f0"},
-                "U": {"name": "Blue", "color": "#007acc"},
-                "B": {"name": "Black", "color": "#808080"},
-                "R": {"name": "Red", "color": "#cc0000"},
-                "G": {"name": "Green", "color": "#00cc66"},
-            }
-
+            wubrg_colors = {'W': {'name': 'White', 'color': '#f0f0f0'}, 'U': {'name': 'Blue', 'color': '#007acc'}, 'B': {'name': 'Black', 'color': '#808080'}, 'R': {'name': 'Red', 'color': '#cc0000'}, 'G': {'name': 'Green', 'color': '#00cc66'}}
             single_color_groups: dict = {color: [] for color in wubrg_colors.keys()}
             multicolor_cards = []
             colorless_cards = []
             land_cards = []
-
             for card_data in self.last_analysis_cards:
-                color_identity = card_data.get("color_identity", [])
-                card_type = card_data.get("type_line", "").lower()
-
-                if "land" in card_type:
+                color_identity = card_data.get('color_identity', [])
+                card_type = card_data.get('type_line', '').lower()
+                if 'land' in card_type:
                     land_cards.append(card_data)
                 elif not color_identity:
                     colorless_cards.append(card_data)
@@ -1172,194 +659,98 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                     single_color_groups[color_identity[0]].append(card_data)
                 else:
                     multicolor_cards.append(card_data)
-
-            # Export individual color files
             exported_files = []
-
-            # Single color exports
             for color_code, color_info in wubrg_colors.items():
                 if single_color_groups[color_code]:
                     filename = f"{base_filename}_{color_info['name'].lower()}.csv"
-                    filepath = f"{export_dir}/{filename}"
-                    self._export_color_breakdown(
-                        filepath,
-                        single_color_groups[color_code],
-                        color_info["name"],
-                        color_info["color"],
-                        letter_mapping,
-                    )
+                    filepath = f'{export_dir}/{filename}'
+                    self._export_color_breakdown(filepath, single_color_groups[color_code], color_info['name'], color_info['color'], letter_mapping)
                     exported_files.append(filename)
-
-            # Multicolor export
             if multicolor_cards:
-                filename = f"{base_filename}_multicolor.csv"
-                filepath = f"{export_dir}/{filename}"
-                self._export_color_breakdown(
-                    filepath, multicolor_cards, "Multicolor", "#ff6600", letter_mapping
-                )
+                filename = f'{base_filename}_multicolor.csv'
+                filepath = f'{export_dir}/{filename}'
+                self._export_color_breakdown(filepath, multicolor_cards, 'Multicolor', '#ff6600', letter_mapping)
                 exported_files.append(filename)
-
-            # Colorless export
             if colorless_cards:
-                filename = f"{base_filename}_colorless.csv"
-                filepath = f"{export_dir}/{filename}"
-                self._export_color_breakdown(
-                    filepath, colorless_cards, "Colorless", "#9a9a9a", letter_mapping
-                )
+                filename = f'{base_filename}_colorless.csv'
+                filepath = f'{export_dir}/{filename}'
+                self._export_color_breakdown(filepath, colorless_cards, 'Colorless', '#9a9a9a', letter_mapping)
                 exported_files.append(filename)
-
-            # Lands export
             if land_cards:
-                filename = f"{base_filename}_lands.csv"
-                filepath = f"{export_dir}/{filename}"
-                self._export_color_breakdown(filepath, land_cards, "Lands", "#8b4513", letter_mapping)
+                filename = f'{base_filename}_lands.csv'
+                filepath = f'{export_dir}/{filename}'
+                self._export_color_breakdown(filepath, land_cards, 'Lands', '#8b4513', letter_mapping)
                 exported_files.append(filename)
-
-            # Combined summary export
-            summary_filename = f"{base_filename}_summary.csv"
-            summary_filepath = f"{export_dir}/{summary_filename}"
-            self._export_wubrg_summary(
-                summary_filepath,
-                {
-                    **{
-                        color_info["name"]: single_color_groups[color_code]
-                        for color_code, color_info in wubrg_colors.items()
-                        if single_color_groups[color_code]
-                    },
-                    **({"Multicolor": multicolor_cards} if multicolor_cards else {}),
-                    **({"Colorless": colorless_cards} if colorless_cards else {}),
-                    **({"Lands": land_cards} if land_cards else {}),
-                },
-                letter_mapping,
-            )
+            summary_filename = f'{base_filename}_summary.csv'
+            summary_filepath = f'{export_dir}/{summary_filename}'
+            self._export_wubrg_summary(summary_filepath, {**{color_info['name']: single_color_groups[color_code] for color_code, color_info in wubrg_colors.items() if single_color_groups[color_code]}, **({'Multicolor': multicolor_cards} if multicolor_cards else {}), **({'Colorless': colorless_cards} if colorless_cards else {}), **({'Lands': land_cards} if land_cards else {})}, letter_mapping)
             exported_files.append(summary_filename)
-
             if exported_files:
-                QMessageBox.information(
-                    self,
-                    "WUBRG Export Successful",
-                    f"WUBRG analysis exported to {len(exported_files)} files:\n\n"
-                    + "\n".join(exported_files)
-                    + f"\n\nLocation: {export_dir}",
-                )
+                QMessageBox.information(self, 'WUBRG Export Successful', f'WUBRG analysis exported to {len(exported_files)} files:\n\n' + '\n'.join(exported_files) + f'\n\nLocation: {export_dir}')
             else:
-                QMessageBox.information(self, "Export Info", "No WUBRG data to export.")
-
+                QMessageBox.information(self, 'Export Info', 'No WUBRG data to export.')
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "WUBRG Export Error",
-                f"Failed to export WUBRG results:\n\n{str(e)}",
-            )
+            QMessageBox.critical(self, 'WUBRG Export Error', f'Failed to export WUBRG results:\n\n{str(e)}')
 
     def _export_color_breakdown(self, filepath, cards, color_name, color_hex, letter_mapping=None):
         if letter_mapping is None:
             letter_mapping = {}
-
         letter_counts = {}
         for card_data in cards:
-            card_name = card_data.get("name", "")
+            card_name = card_data.get('name', '')
             if not card_name:
                 continue
             first_letter = card_name[0].upper()
-            # Apply letter grouping if mapping exists
             grouped_letter = letter_mapping.get(first_letter, first_letter)
             if grouped_letter not in letter_counts:
                 letter_counts[grouped_letter] = 0
             letter_counts[grouped_letter] += 1
-
         sorted_letters = sorted(letter_counts.items(), key=lambda x: x[1], reverse=True)
-
-        with open(filepath, "w", newline="", encoding="utf-8") as f:
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["Color Category", "Color Hex", "Letter", "Count", "Percentage"]
-            )
-
-            total_cards = sum(count for _, count in sorted_letters)
+            writer.writerow(['Color Category', 'Color Hex', 'Letter', 'Count', 'Percentage'])
+            total_cards = sum((count for _, count in sorted_letters))
             for letter, count in sorted_letters:
-                percentage = (count / total_cards * 100) if total_cards > 0 else 0
-                writer.writerow(
-                    [color_name, color_hex, letter, count, f"{percentage:.1f}%"]
-                )
+                percentage = count / total_cards * 100 if total_cards > 0 else 0
+                writer.writerow([color_name, color_hex, letter, count, f'{percentage:.1f}%'])
 
     def _export_wubrg_summary(self, filepath, all_categories, letter_mapping=None):
         if letter_mapping is None:
             letter_mapping = {}
-
-        with open(filepath, "w", newline="", encoding="utf-8") as f:
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["Category", "Color Hex", "Total Cards", "Letter Count", "Top Letters"]
-            )
-
+            writer.writerow(['Category', 'Color Hex', 'Total Cards', 'Letter Count', 'Top Letters'])
             for category_name, cards in all_categories.items():
                 if not cards:
                     continue
-
-                color_hex = {
-                    "White": "#f0f0f0",
-                    "Blue": "#007acc",
-                    "Black": "#808080",
-                    "Red": "#cc0000",
-                    "Green": "#00cc66",
-                    "Multicolor": "#ff6600",
-                    "Colorless": "#9a9a9a",
-                    "Lands": "#8b4513",
-                }.get(category_name, "#000000")
-
+                color_hex = {'White': '#f0f0f0', 'Blue': '#007acc', 'Black': '#808080', 'Red': '#cc0000', 'Green': '#00cc66', 'Multicolor': '#ff6600', 'Colorless': '#9a9a9a', 'Lands': '#8b4513'}.get(category_name, '#000000')
                 letter_counts = {}
                 for card_data in cards:
-                    card_name = card_data.get("name", "")
+                    card_name = card_data.get('name', '')
                     if not card_name:
                         continue
                     first_letter = card_name[0].upper()
-                    # Apply letter grouping if mapping exists
                     grouped_letter = letter_mapping.get(first_letter, first_letter)
                     if grouped_letter not in letter_counts:
                         letter_counts[grouped_letter] = 0
                     letter_counts[grouped_letter] += 1
-
-                sorted_letters = sorted(
-                    letter_counts.items(), key=lambda x: x[1], reverse=True
-                )
-                top_letters = ", ".join(
-                    [f"{letter}({count})" for letter, count in sorted_letters[:3]]
-                )
-
-                writer.writerow(
-                    [
-                        category_name,
-                        color_hex,
-                        len(cards),
-                        len(letter_counts),
-                        top_letters,
-                    ]
-                )
+                sorted_letters = sorted(letter_counts.items(), key=lambda x: x[1], reverse=True)
+                top_letters = ', '.join([f'{letter}({count})' for letter, count in sorted_letters[:3]])
+                writer.writerow([category_name, color_hex, len(cards), len(letter_counts), top_letters])
 
     def _add_wubrg_export_buttons(self):
         for widget in self.chart_layout.parent().findChildren(QPushButton):
-            if widget.objectName() == "wubrg_export_button":
+            if widget.objectName() == 'wubrg_export_button':
                 widget.deleteLater()
-
-        wubrg_colors = {
-            "W": {"name": "White", "color": "#f0f0f0"},
-            "U": {"name": "Blue", "color": "#007acc"},
-            "B": {"name": "Black", "color": "#808080"},
-            "R": {"name": "Red", "color": "#cc0000"},
-            "G": {"name": "Green", "color": "#00cc66"},
-        }
-
+        wubrg_colors = {'W': {'name': 'White', 'color': '#f0f0f0'}, 'U': {'name': 'Blue', 'color': '#007acc'}, 'B': {'name': 'Black', 'color': '#808080'}, 'R': {'name': 'Red', 'color': '#cc0000'}, 'G': {'name': 'Green', 'color': '#00cc66'}}
         single_color_groups = {color: [] for color in wubrg_colors.keys()}
         multicolor_cards = []
         colorless_cards = []
         land_cards = []
-
         for card_data in self.last_analysis_cards:
-            color_identity = card_data.get("color_identity", [])
-            card_type = card_data.get("type_line", "").lower()
-
-            if "land" in card_type:
+            color_identity = card_data.get('color_identity', [])
+            card_type = card_data.get('type_line', '').lower()
+            if 'land' in card_type:
                 land_cards.append(card_data)
             elif not color_identity:
                 colorless_cards.append(card_data)
@@ -1367,58 +758,32 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
                 single_color_groups[color_identity[0]].append(card_data)
             else:
                 multicolor_cards.append(card_data)
-
         button_layout = QHBoxLayout()
-
         for color_code, color_info in wubrg_colors.items():
             if single_color_groups[color_code]:
                 button = QPushButton(f"Export {color_info['name']}")
-                button.setObjectName("wubrg_export_button")
+                button.setObjectName('wubrg_export_button')
                 button.setToolTip(f"Export {color_info['name']} cards breakdown to CSV")
-                button.clicked.connect(
-                    lambda checked, cards=single_color_groups[
-                        color_code
-                    ], name=color_info["name"], color=color_info[
-                        "color"
-                    ]: self._export_single_category(
-                        cards, name, color
-                    )
-                )
+                button.clicked.connect(lambda checked, cards=single_color_groups[color_code], name=color_info['name'], color=color_info['color']: self._export_single_category(cards, name, color))
                 button_layout.addWidget(button)
-
         if multicolor_cards:
-            button = QPushButton("Export Multicolor")
-            button.setObjectName("wubrg_export_button")
-            button.setToolTip("Export multicolor cards breakdown to CSV")
-            button.clicked.connect(
-                lambda checked, cards=multicolor_cards: self._export_single_category(
-                    cards, "Multicolor", "#ff6600"
-                )
-            )
+            button = QPushButton('Export Multicolor')
+            button.setObjectName('wubrg_export_button')
+            button.setToolTip('Export multicolor cards breakdown to CSV')
+            button.clicked.connect(lambda checked, cards=multicolor_cards: self._export_single_category(cards, 'Multicolor', '#ff6600'))
             button_layout.addWidget(button)
-
         if colorless_cards:
-            button = QPushButton("Export Colorless")
-            button.setObjectName("wubrg_export_button")
-            button.setToolTip("Export colorless cards breakdown to CSV")
-            button.clicked.connect(
-                lambda checked, cards=colorless_cards: self._export_single_category(
-                    cards, "Colorless", "#9a9a9a"
-                )
-            )
+            button = QPushButton('Export Colorless')
+            button.setObjectName('wubrg_export_button')
+            button.setToolTip('Export colorless cards breakdown to CSV')
+            button.clicked.connect(lambda checked, cards=colorless_cards: self._export_single_category(cards, 'Colorless', '#9a9a9a'))
             button_layout.addWidget(button)
-
         if land_cards:
-            button = QPushButton("Export Lands")
-            button.setObjectName("wubrg_export_button")
-            button.setToolTip("Export lands breakdown to CSV")
-            button.clicked.connect(
-                lambda checked, cards=land_cards: self._export_single_category(
-                    cards, "Lands", "#8b4513"
-                )
-            )
+            button = QPushButton('Export Lands')
+            button.setObjectName('wubrg_export_button')
+            button.setToolTip('Export lands breakdown to CSV')
+            button.clicked.connect(lambda checked, cards=land_cards: self._export_single_category(cards, 'Lands', '#8b4513'))
             button_layout.addWidget(button)
-
         if button_layout.count() > 0:
             button_widget = QWidget()
             button_widget.setLayout(button_layout)
@@ -1427,183 +792,110 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
     def _export_single_category(self, cards, category_name, color_hex):
         try:
             if not cards:
-                QMessageBox.information(
-                    self, "Export Info", f"No {category_name} cards to export."
-                )
+                QMessageBox.information(self, 'Export Info', f'No {category_name} cards to export.')
                 return
-
-            if hasattr(self, "last_analysis_data") and self.last_analysis_data:
-                set_codes = self.last_analysis_data.get(
-                    "set_codes", [self.last_analysis_data.get("set_code", "")]
-                )
+            if hasattr(self, 'last_analysis_data') and self.last_analysis_data:
+                set_codes = self.last_analysis_data.get('set_codes', [self.last_analysis_data.get('set_code', '')])
                 if len(set_codes) == 1:
-                    base_filename = f"{set_codes[0]}_{category_name.lower()}"
+                    base_filename = f'{set_codes[0]}_{category_name.lower()}'
                 else:
-                    base_filename = (
-                        f"combined_{len(set_codes)}_sets_{category_name.lower()}"
-                    )
-
-                # Extract letter grouping mapping from the analysis data
+                    base_filename = f'combined_{len(set_codes)}_sets_{category_name.lower()}'
                 letter_mapping = self._extract_letter_grouping_from_data(self.last_analysis_data)
             else:
-                base_filename = f"analysis_{category_name.lower()}"
+                base_filename = f'analysis_{category_name.lower()}'
                 letter_mapping = {}
-
-            filename = f"{base_filename}.csv"
-            filepath, _ = QFileDialog.getSaveFileName(
-                self,
-                f"Save {category_name} Analysis",
-                filename,
-                "CSV Files (*.csv);All Files (*.*)",
-            )
+            filename = f'{base_filename}.csv'
+            filepath, _ = QFileDialog.getSaveFileName(self, f'Save {category_name} Analysis', filename, 'CSV Files (*.csv);All Files (*.*)')
             if not filepath:
                 return
-
             self._export_color_breakdown(filepath, cards, category_name, color_hex, letter_mapping)
-
-            QMessageBox.information(
-                self,
-                "Export Successful",
-                f"{category_name} analysis exported to:\n{filepath}",
-            )
-
+            QMessageBox.information(self, 'Export Successful', f'{category_name} analysis exported to:\n{filepath}')
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Export Error",
-                f"Failed to export {category_name} results:\n\n{str(e)}",
-            )
+            QMessageBox.critical(self, 'Export Error', f'Failed to export {category_name} results:\n\n{str(e)}')
 
     def _toggle_maximize_chart(self):
-        """Toggle fullscreen/maximized view of the chart"""
         if self.maximized_dialog and self.maximized_dialog.isVisible():
-            # Restore from maximized
             self._restore_chart()
         else:
-            # Maximize chart
             self._maximize_chart()
 
     def _maximize_chart(self):
-        """Show chart in maximized dialog"""
         if not self.canvas:
             return
-
-        # Create fullscreen dialog
         self.maximized_dialog = QDialog(self)
-        self.maximized_dialog.setWindowTitle("Analysis Chart - Maximized View")
-        self.maximized_dialog.setWindowFlags(
-            Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint
-        )
-
-        # Make it fill most of the screen
+        self.maximized_dialog.setWindowTitle('Analysis Chart - Maximized View')
+        self.maximized_dialog.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowMaximizeButtonHint)
         screen = self.screen().availableGeometry()
-        self.maximized_dialog.setGeometry(
-            screen.x() + 50,
-            screen.y() + 50,
-            screen.width() - 100,
-            screen.height() - 100,
-        )
-
+        self.maximized_dialog.setGeometry(screen.x() + 50, screen.y() + 50, screen.width() - 100, screen.height() - 100)
         layout = QVBoxLayout(self.maximized_dialog)
-
-        # Add instructions
         header = QHBoxLayout()
-        info_label = QLabel("Press Escape or click Restore to exit fullscreen")
-        info_label.setStyleSheet("color: #888; font-size: 11px; padding: 5px;")
+        info_label = QLabel('Press Escape or click Restore to exit fullscreen')
+        info_label.setStyleSheet('color: #888; font-size: 11px; padding: 5px;')
         header.addWidget(info_label)
         header.addStretch()
-
-        restore_button = QPushButton("⛶ Restore")
+        restore_button = QPushButton(' Restore')
         restore_button.setMaximumWidth(100)
         restore_button.clicked.connect(self._restore_chart)
         header.addWidget(restore_button)
-
         layout.addLayout(header)
-
-        # Move canvas and toolbar to dialog
         if self.toolbar and self.toolbar.parent():
             self.toolbar.setParent(None)
             layout.addWidget(self.toolbar)
-
         if self.canvas.parent():
             self.canvas.setParent(None)
             layout.addWidget(self.canvas, 1)
-
-        # Update button text
-        self.maximize_button.setText("⛶ Restore")
-        self.maximize_button.setToolTip("Restore normal view")
-
-        # Show maximized
+        self.maximize_button.setText(' Restore')
+        self.maximize_button.setToolTip('Restore normal view')
         self.maximized_dialog.show()
-
-        # Redraw to adjust to new size
         if self.canvas:
             self.canvas.draw()
             self.canvas.flush_events()
 
     def _restore_chart(self):
-        """Restore chart to normal view"""
         if not self.maximized_dialog:
             return
-
-        # Move canvas and toolbar back to main layout
         if self.toolbar:
             self.toolbar.setParent(None)
-
         if self.canvas:
             self.canvas.setParent(None)
-
-        # Re-add to chart layout
         if self.toolbar:
             toolbar_layout = QHBoxLayout()
             toolbar_layout.addWidget(self.toolbar)
             toolbar_layout.addStretch()
-            zoom_hint = QLabel("💡 Use toolbar to pan/zoom")
-            zoom_hint.setStyleSheet("color: #888; font-size: 10px;")
+            zoom_hint = QLabel(' Use toolbar to pan/zoom')
+            zoom_hint.setStyleSheet('color: #888; font-size: 10px;')
             toolbar_layout.addWidget(zoom_hint)
             self.chart_layout.insertLayout(0, toolbar_layout)
-
         if self.canvas:
             self.chart_layout.insertWidget(1, self.canvas, 1)
-
-        # Update button text
-        self.maximize_button.setText("⛶ Maximize")
-        self.maximize_button.setToolTip("Maximize chart view (Escape to exit)")
-
-        # Close and cleanup dialog
+        self.maximize_button.setText(' Maximize')
+        self.maximize_button.setToolTip('Maximize chart view (Escape to exit)')
         self.maximized_dialog.close()
         self.maximized_dialog.deleteLater()
         self.maximized_dialog = None
-
-        # Redraw to adjust to new size
         if self.canvas:
             self.canvas.draw()
             self.canvas.flush_events()
 
     def keyPressEvent(self, event):
-        """Handle keyboard shortcuts"""
         if event.key() == Qt.Key.Key_Escape and self.maximized_dialog:
             self._restore_chart()
         else:
             super().keyPressEvent(event)
 
     def resizeEvent(self, event):
-        """Handle window resize to adjust chart"""
         super().resizeEvent(event)
         if self.canvas and self.canvas.isVisible():
-            # Trigger a redraw on resize to adjust layout
             self.canvas.updateGeometry()
             if self.last_analysis_data:
-                # Small delay to let the resize complete
                 from PyQt6.QtCore import QTimer
                 QTimer.singleShot(100, self._handle_resize_redraw)
 
     def _handle_resize_redraw(self):
-        """Redraw chart after resize"""
         if self.canvas and self.last_analysis_data:
             try:
                 self.canvas.draw()
                 if self.toolbar:
                     self.toolbar.update()
             except Exception:
-                pass  # Ignore errors during resize
+                pass

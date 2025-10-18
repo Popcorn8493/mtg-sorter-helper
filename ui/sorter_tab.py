@@ -1,32 +1,24 @@
-# ui/sorter_tab.py - Collection sorting interface (Refactored)
-
 from typing import Dict, List
+
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal as Signal
-from PyQt6.QtWidgets import (
-    QApplication,
-    QTreeWidgetItem,
-    QTreeWidgetItemIterator,
-    QWidget,
-    QVBoxLayout,
-)
+from PyQt6.QtWidgets import QApplication, QTreeWidgetItem, QTreeWidgetItemIterator, QWidget, QVBoxLayout
 
 from api.scryfall_api import ScryfallAPI
 from core.decorators import safe_ui_method, safe_cleanup_method
 from core.models import Card, SortGroup
-from .status_manager import StatusAwareMixin
 from ui.custom_widgets import NavigableTreeWidget
 from ui.set_sorter_view import SetSorterView
-from ui.sorter_tab_ui import SorterTabUi
+from ui.sorter_export import SorterExport
 from ui.sorter_handlers import SorterHandlers
+from ui.sorter_import import SorterImport
 from ui.sorter_navigation import SorterNavigation
 from ui.sorter_preview import SorterPreview
-from ui.sorter_export import SorterExport
-from ui.sorter_import import SorterImport
+from ui.sorter_tab_ui import SorterTabUi
 from workers.threads import WorkerManager
+from .status_manager import StatusAwareMixin
 
 
 class ManaBoxSorterTab(QWidget, StatusAwareMixin):
-    # Signals for communication with main window
     collection_loaded = Signal()
     progress_updated = Signal(int)
     project_modified = Signal()
@@ -37,19 +29,14 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
         super().__init__()
         self.api = api
         self.all_cards: List[Card] = []
-
-        # Centralized worker management
         self.worker_manager = WorkerManager()
-
-        # Legacy thread/worker attributes for backward compatibility
         self.import_thread = None
         self.import_worker = None
         self.image_thread = None
         self.image_worker = None
         self.background_cache_thread = None
         self.background_cache_worker = None
-
-        self.cached_images: dict[str, str] = {}  # scryfall_id -> cache_path
+        self.cached_images: dict[str, str] = {}
         self.sort_order: List[str] = []
         self.current_loading_id: str | None = None
         self.last_csv_path: str | None = None
@@ -58,328 +45,154 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
         self.preview_card: Card | None = None
         self.splitter_sizes = [700, 350]
         self.ui: SorterTabUi | None = None
-
-        # Simple operation flags to prevent crashes
         self._is_refreshing = False
         self._is_destroyed = False
         self._is_navigating = False
-        self._is_generating_plan = False  # Guard against recursive plan generation
-
-        # Initialize component modules
+        self._is_generating_plan = False
         self.handlers = SorterHandlers(self)
         self.navigation = SorterNavigation(self)
         self.preview = SorterPreview(self)
         self.export = SorterExport(self)
         self.import_module = SorterImport(self)
-
-        # UI widget attributes will be created by SorterTabUi using factory pattern
-        # All widget attributes are dynamically created and assigned by the factory
-
         QVBoxLayout(self)
         QTimer.singleShot(0, self.setup_ui)
 
     def cleanup_workers(self):
-        """Clean up any running workers WITHOUT marking widget as destroyed"""
-        # Use centralized worker management
         self.worker_manager.cleanup_all()
-
-        # Legacy cleanup for backward compatibility
         from workers.threads import cleanup_worker_thread
-
         cleanup_worker_thread(self.import_thread, self.import_worker)
         cleanup_worker_thread(self.image_thread, self.image_worker)
-        cleanup_worker_thread(
-            self.background_cache_thread, self.background_cache_worker
-        )
+        cleanup_worker_thread(self.background_cache_thread, self.background_cache_worker)
 
-    def handle_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = True,
-        message_timeout: int = 5000,
-        log_prefix: str = "ERROR",
-        error_category: str = "GENERAL",
-        additional_context: str = None,
-    ) -> None:
-        """Centralized error handling with enhanced categorization and context"""
+    def handle_error(self, operation: str, error: Exception, show_message: bool=True, message_timeout: int=5000, log_prefix: str='ERROR', error_category: str='GENERAL', additional_context: str=None) -> None:
         try:
-            # Enhanced logging with structured information
-            context_info = (
-                f" | Context: {additional_context}" if additional_context else ""
-            )
+            context_info = f' | Context: {additional_context}' if additional_context else ''
             error_type = type(error).__name__
-            timestamp = __import__("datetime").datetime.now().strftime("%H:%M:%S")
-
-            # Log with enhanced formatting
-            print(f"[{timestamp}] {log_prefix}[{error_category}]: {operation} failed")
-            print(f"  Error Type: {error_type}")
-            print(f"  Error Message: {error}")
+            timestamp = __import__('datetime').datetime.now().strftime('%H:%M:%S')
+            print(f'[{timestamp}] {log_prefix}[{error_category}]: {operation} failed')
+            print(f'  Error Type: {error_type}')
+            print(f'  Error Message: {error}')
             if context_info:
-                print(f"  {context_info}")
-
-            # Print full traceback for debugging
+                print(f'  {context_info}')
             import traceback
-
             traceback.print_exc()
-
-            # Show user message if requested
-            if show_message and hasattr(self, "show_status_message"):
-                # Truncate long error messages for better UX
+            if show_message and hasattr(self, 'show_status_message'):
                 error_msg = str(error)
                 if len(error_msg) > 100:
-                    error_msg = error_msg[:97] + "..."
-
-                # Add category-specific messaging
-                if error_category == "CRITICAL":
-                    error_msg = f"Critical Error: {error_msg}"
-                elif error_category == "UI":
-                    error_msg = f"Interface Error: {error_msg}"
-                elif error_category == "BACKGROUND":
-                    error_msg = f"Background Task Error: {error_msg}"
-
-                self.show_status_message(
-                    f"Error: {error_msg}", message_timeout, style="error"
-                )
-
+                    error_msg = error_msg[:97] + '...'
+                if error_category == 'CRITICAL':
+                    error_msg = f'Critical Error: {error_msg}'
+                elif error_category == 'UI':
+                    error_msg = f'Interface Error: {error_msg}'
+                elif error_category == 'BACKGROUND':
+                    error_msg = f'Background Task Error: {error_msg}'
+                self.show_status_message(f'Error: {error_msg}', message_timeout, style='error')
         except Exception as handler_error:
-            # Fallback error handling to prevent infinite loops
-            print(f"CRITICAL: Error handler itself failed: {handler_error}")
+            print(f'CRITICAL: Error handler itself failed: {handler_error}')
             import traceback
-
             traceback.print_exc()
 
-    def handle_silent_error(
-        self,
-        operation: str,
-        error: Exception,
-        log_prefix: str = "ERROR",
-        error_category: str = "SILENT",
-        additional_context: str = None,
-    ) -> None:
-        """Handle errors silently without user notification"""
-        self.handle_error(
-            operation,
-            error,
-            show_message=False,
-            log_prefix=log_prefix,
-            error_category=error_category,
-            additional_context=additional_context,
-        )
+    def handle_silent_error(self, operation: str, error: Exception, log_prefix: str='ERROR', error_category: str='SILENT', additional_context: str=None) -> None:
+        self.handle_error(operation, error, show_message=False, log_prefix=log_prefix, error_category=error_category, additional_context=additional_context)
 
-    def handle_ui_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = True,
-        additional_context: str = None,
-    ) -> None:
-        """Handle UI-specific errors with appropriate logging"""
-        self.handle_error(
-            operation,
-            error,
-            show_message=show_message,
-            log_prefix="[UI]",
-            error_category="UI",
-            additional_context=additional_context,
-        )
+    def handle_ui_error(self, operation: str, error: Exception, show_message: bool=True, additional_context: str=None) -> None:
+        self.handle_error(operation, error, show_message=show_message, log_prefix='[UI]', error_category='UI', additional_context=additional_context)
 
-    def handle_background_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = False,
-        additional_context: str = None,
-    ) -> None:
-        """Handle background operation errors"""
-        self.handle_error(
-            operation,
-            error,
-            show_message=show_message,
-            log_prefix="[Background]",
-            error_category="BACKGROUND",
-            additional_context=additional_context,
-        )
+    def handle_background_error(self, operation: str, error: Exception, show_message: bool=False, additional_context: str=None) -> None:
+        self.handle_error(operation, error, show_message=show_message, log_prefix='[Background]', error_category='BACKGROUND', additional_context=additional_context)
 
-    def handle_critical_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = True,
-        additional_context: str = None,
-    ) -> None:
-        """Handle critical errors that may require user attention"""
-        self.handle_error(
-            operation,
-            error,
-            show_message=show_message,
-            log_prefix="[CRITICAL]",
-            error_category="CRITICAL",
-            additional_context=additional_context,
-        )
+    def handle_critical_error(self, operation: str, error: Exception, show_message: bool=True, additional_context: str=None) -> None:
+        self.handle_error(operation, error, show_message=show_message, log_prefix='[CRITICAL]', error_category='CRITICAL', additional_context=additional_context)
 
-    def handle_network_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = True,
-        additional_context: str = None,
-    ) -> None:
-        """Handle network-related errors with specific messaging"""
-        context = f"Network operation failed{': ' + additional_context if additional_context else ''}"
-        self.handle_error(
-            operation,
-            error,
-            show_message=show_message,
-            log_prefix="[Network]",
-            error_category="NETWORK",
-            additional_context=context,
-        )
+    def handle_network_error(self, operation: str, error: Exception, show_message: bool=True, additional_context: str=None) -> None:
+        context = f"Network operation failed{(': ' + additional_context if additional_context else '')}"
+        self.handle_error(operation, error, show_message=show_message, log_prefix='[Network]', error_category='NETWORK', additional_context=context)
 
-    def handle_file_error(
-        self,
-        operation: str,
-        error: Exception,
-        show_message: bool = True,
-        additional_context: str = None,
-    ) -> None:
-        """Handle file I/O errors with specific messaging"""
-        context = f"File operation failed{': ' + additional_context if additional_context else ''}"
-        self.handle_error(
-            operation,
-            error,
-            show_message=show_message,
-            log_prefix="[File]",
-            error_category="FILE",
-            additional_context=context,
-        )
+    def handle_file_error(self, operation: str, error: Exception, show_message: bool=True, additional_context: str=None) -> None:
+        context = f"File operation failed{(': ' + additional_context if additional_context else '')}"
+        self.handle_error(operation, error, show_message=show_message, log_prefix='[File]', error_category='FILE', additional_context=context)
 
     def cleanup_widget(self):
-        """Clean up the entire widget and mark as destroyed"""
         if self._is_destroyed:
             return
-
         self._is_destroyed = True
         self.cleanup_workers()
 
     def __del__(self):
-        """Ensure proper cleanup of workers"""
         self.cleanup_widget()
 
     def closeEvent(self, event):
-        """Handle widget close event"""
         self.cleanup_widget()
         super().closeEvent(event)
 
     def setup_ui(self):
-        """Creates the UI by delegating to the SorterTabUi class."""
         self.ui = SorterTabUi(self)
         self.ui.setup_ui(self.layout())
-
-        # Initialize StatusAwareMixin after UI is set up
         StatusAwareMixin.__init__(self)
         self._init_status_manager()
 
-    @safe_ui_method("Plan generation failed")
+    @safe_ui_method('Plan generation failed')
     def _start_plan_generation(self):
-        """Start plan generation with error protection"""
         if self._is_destroyed or self._is_generating_plan:
             return
-
         self.start_new_plan_generation()
 
     def start_new_plan_generation(self):
-        """Resets the entire view and generates a new plan from the top level."""
         if not self.all_cards:
             from PyQt6.QtWidgets import QMessageBox
-
-            QMessageBox.information(
-                self, "No Collection", "Please import a collection first."
-            )
+            QMessageBox.information(self, 'No Collection', 'Please import a collection first.')
             return
-
         if self._is_generating_plan:
             return
-
         self._is_generating_plan = True
         try:
-            # Clear existing layout and stack
             self.navigation.clear_layout(self.breadcrumb_layout)
             self._clear_stack()
             self.preview.reset_preview_pane()
-
-            # Add home breadcrumb and create first level view
-            self.navigation.add_breadcrumb("Home", 0)
+            self.navigation.add_breadcrumb('Home', 0)
             self.navigation.create_new_view(self.all_cards, 0)
             self.handlers.update_button_visibility()
             self.filter_edit.setVisible(True)
-
         except Exception as e:
-            self.handle_critical_error(
-                "start_new_plan_generation",
-                e,
-                additional_context=f"cards_count: {len(self.all_cards) if self.all_cards else 0}, generating: {self._is_generating_plan}",
-            )
+            self.handle_critical_error('start_new_plan_generation', e, additional_context=f'cards_count: {(len(self.all_cards) if self.all_cards else 0)}, generating: {self._is_generating_plan}')
         finally:
             self._is_generating_plan = False
 
-    @safe_cleanup_method("Stack clearing failed")
+    @safe_cleanup_method('Stack clearing failed')
     def _clear_stack(self):
-        """Clear the widget stack with error protection"""
         while self.results_stack.count() > 0:
             widget = self.results_stack.widget(0)
             self.results_stack.removeWidget(widget)
             if widget:
-                if hasattr(widget, "cleanup"):
+                if hasattr(widget, 'cleanup'):
                     widget.cleanup()
                 widget.deleteLater()
-
-        # Process events to ensure deleteLater() is processed
         QApplication.processEvents()
 
     def _refresh_current_view(self):
-        """Refresh current view with crash prevention and proper async handling."""
         if self._is_destroyed or self._is_refreshing:
             return
-
         self._is_refreshing = True
         try:
             current_widget = self.results_stack.currentWidget()
             if isinstance(current_widget, SetSorterView):
-                # Delegate to SetSorterView's regeneration
                 current_widget._safe_regenerate_plan()
                 self._is_refreshing = False
                 return
-
             if not isinstance(current_widget, NavigableTreeWidget):
-                if self.all_cards and not self._is_generating_plan:
+                if self.all_cards and (not self._is_generating_plan):
                     QTimer.singleShot(200, self._start_plan_generation)
                 self._is_refreshing = False
                 return
-
-            # Standard refresh logic
             level = self.results_stack.currentIndex()
-            cards_to_process = getattr(current_widget, "cards_for_view", self.all_cards)
+            cards_to_process = getattr(current_widget, 'cards_for_view', self.all_cards)
             self.sort_order = self._get_sort_order_safely()
-            criterion = (
-                self.sort_order[level] if 0 <= level < len(self.sort_order) else None
-            )
-            nodes = self.navigation._generate_level_breakdown(
-                cards_to_process, criterion
-            )
-
-            # Save state before clearing
-            expanded_items = {
-                item.text(0) for item in self._get_expanded_items(current_widget)
-            }
+            criterion = self.sort_order[level] if 0 <= level < len(self.sort_order) else None
+            nodes = self.navigation._generate_level_breakdown(cards_to_process, criterion)
+            expanded_items = {item.text(0) for item in self._get_expanded_items(current_widget)}
             selected_items = {item.text(0) for item in current_widget.selectedItems()}
-            current_item_text = (
-                current_widget.currentItem().text(0)
-                if current_widget.currentItem()
-                else None
-            )
+            current_item_text = current_widget.currentItem().text(0) if current_widget.currentItem() else None
             scroll_position = current_widget.verticalScrollBar().value()
-            # Update tree asynchronously
             current_widget.setUpdatesEnabled(False)
             current_widget.clear()
 
@@ -389,37 +202,22 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
                     return
                 try:
                     show_sorted = self.show_sorted_check.isChecked()
-                    header_label = "Total Count" if show_sorted else "Unsorted Count"
-                    current_widget.setHeaderLabels(["Group", header_label])
-                    # Restore state after population is complete
-                    self._restore_tree_state(
-                        current_widget,
-                        expanded_items,
-                        selected_items,
-                        current_item_text,
-                        scroll_position,
-                    )
+                    header_label = 'Total Count' if show_sorted else 'Unsorted Count'
+                    current_widget.setHeaderLabels(['Group', header_label])
+                    self._restore_tree_state(current_widget, expanded_items, selected_items, current_item_text, scroll_position)
                     current_widget.setUpdatesEnabled(True)
                 except Exception as e:
-                    self.handle_silent_error("post-population refresh", e)
+                    self.handle_silent_error('post-population refresh', e)
                 finally:
                     self._is_refreshing = False
                     self.handlers.update_button_visibility()
                     self._update_view_layout()
-
-            current_widget._populate_tree_progressively(
-                nodes, on_finished=on_population_finished
-            )
+            current_widget._populate_tree_progressively(nodes, on_finished=on_population_finished)
         except Exception as e:
-            self.handle_ui_error(
-                "_refresh_current_view setup",
-                e,
-                additional_context=f"destroyed: {self._is_destroyed}, refreshing: {self._is_refreshing}",
-            )
+            self.handle_ui_error('_refresh_current_view setup', e, additional_context=f'destroyed: {self._is_destroyed}, refreshing: {self._is_refreshing}')
             self._is_refreshing = False
 
     def _get_expanded_items(self, tree_widget):
-        """Helper to get expanded items safely"""
         expanded = []
         try:
             iterator = QTreeWidgetItemIterator(tree_widget)
@@ -432,15 +230,7 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
             pass
         return expanded
 
-    def _restore_tree_state(
-        self,
-        tree_widget,
-        expanded_items,
-        selected_items,
-        current_item_text,
-        scroll_position,
-    ):
-        """Helper to restore tree state safely"""
+    def _restore_tree_state(self, tree_widget, expanded_items, selected_items, current_item_text, scroll_position):
         tree_widget.blockSignals(True)
         try:
             iterator = QTreeWidgetItemIterator(tree_widget)
@@ -455,132 +245,76 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
                     tree_widget.setCurrentItem(item)
                 iterator += 1
         except Exception as e:
-            self.handle_silent_error("restoring tree state", e)
+            self.handle_silent_error('restoring tree state', e)
         finally:
             tree_widget.blockSignals(False)
-            # Manually trigger the selection update for the preview pane since signals were blocked
             if tree_widget.currentItem():
                 self.handlers.on_tree_selection_changed(tree_widget.currentItem(), None)
-            # Restore scroll position with slight delay
-            QTimer.singleShot(
-                50, lambda: tree_widget.verticalScrollBar().setValue(scroll_position)
-            )
+            QTimer.singleShot(50, lambda: tree_widget.verticalScrollBar().setValue(scroll_position))
 
     def _update_sorted_item_visibility(self):
-        """Update visibility of sorted items based on show_sorted checkbox"""
         if self._is_destroyed:
             return
-
         try:
             current_widget = self.results_stack.currentWidget()
             if not isinstance(current_widget, NavigableTreeWidget):
                 return
-
             show_sorted = self.show_sorted_check.isChecked()
-
-            # Iterate through all items and update visibility
             iterator = QTreeWidgetItemIterator(current_widget)
             while iterator.value():
                 item = iterator.value()
                 if item:
-                    # Check if item is sorted (checkbox checked)
                     is_sorted = item.checkState(0) == Qt.CheckState.Checked
                     if is_sorted:
-                        # Hide sorted items if show_sorted is False
                         item.setHidden(not show_sorted)
                     else:
-                        # Always show unsorted items
                         item.setHidden(False)
                 iterator += 1
-
         except Exception as e:
-            self.handle_silent_error("updating sorted item visibility", e)
+            self.handle_silent_error('updating sorted item visibility', e)
 
     def _update_view_layout(self):
-        """Shows or hides the card preview pane"""
         self.preview_panel.setVisible(True)
         if not self.preview_panel.isVisible():
             self.main_splitter.setSizes(self.splitter_sizes)
 
     def _check_level_completion(self, item: QTreeWidgetItem):
-        """Check if the current level is complete and offer to advance"""
         if self._is_destroyed:
             return
-
         try:
             current_widget = self.results_stack.currentWidget()
             if not isinstance(current_widget, NavigableTreeWidget):
                 return
-
-            # Get all cards currently visible in this level
-            all_cards_in_level = getattr(current_widget, "cards_for_view", [])
+            all_cards_in_level = getattr(current_widget, 'cards_for_view', [])
             if not all_cards_in_level:
                 return
-
-            # Check if all cards in this level are sorted
-            all_sorted = all(c.is_fully_sorted for c in all_cards_in_level)
+            all_sorted = all((c.is_fully_sorted for c in all_cards_in_level))
             if all_sorted:
                 current_level = self.results_stack.currentIndex()
                 sort_order = self._get_sort_order_safely()
-
-                # Check if we're at the final level
                 if current_level >= len(sort_order) - 1:
-                    # This is the final level
                     from PyQt6.QtWidgets import QMessageBox
-
-                    QMessageBox.information(
-                        self,
-                        "Level Complete!",
-                        f"Congratulations! All cards in this group have been sorted.\n\n"
-                        f"You can now navigate back to continue with other groups.",
-                    )
+                    QMessageBox.information(self, 'Level Complete!', f'Congratulations! All cards in this group have been sorted.\n\nYou can now navigate back to continue with other groups.')
                 else:
-                    # There are more levels, ask if user wants to advance
-                    next_criterion = (
-                        sort_order[current_level + 1]
-                        if current_level + 1 < len(sort_order)
-                        else "Next Level"
-                    )
-                    reply = QMessageBox.question(
-                        self,
-                        "Level Complete!",
-                        f"All cards in this level have been sorted!\n\n"
-                        f"Would you like to advance to the next level ({next_criterion})?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.Yes,
-                    )
-
+                    next_criterion = sort_order[current_level + 1] if current_level + 1 < len(sort_order) else 'Next Level'
+                    reply = QMessageBox.question(self, 'Level Complete!', f'All cards in this level have been sorted!\n\nWould you like to advance to the next level ({next_criterion})?', QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes)
                     if reply == QMessageBox.StandardButton.Yes:
-                        # Advance to next level automatically
-                        self.show_status_message(
-                            f" Advancing to {next_criterion} level...",
-                            3000,
-                            style="info",
-                        )
-                        # This would require implementing automatic progression logic
-                        # For now, just show the message
-
+                        self.show_status_message(f' Advancing to {next_criterion} level...', 3000, style='info')
         except Exception as e:
-            self.handle_silent_error("_check_level_completion", e)
+            self.handle_silent_error('_check_level_completion', e)
 
     def _mark_cards_as_sorted(self, item: QTreeWidgetItem) -> bool:
-        """Internal method that only marks cards without refreshing, for batch operations."""
         cards_to_mark = self.navigation._get_cards_from_item(item)
         if not cards_to_mark:
-            self.show_status_message(
-                " Could not find cards for this group.", style="warning"
-            )
+            self.show_status_message(' Could not find cards for this group.', style='warning')
             return False
         for card in cards_to_mark:
             card.sorted_count = card.quantity
         return True
 
-    def show_status_message(self, message: str, timeout: int = 2500):
-        """Show status message with visual feedback using StatusManager"""
-        # Use the StatusAwareMixin method which delegates to StatusManager
+    def show_status_message(self, message: str, timeout: int=2500):
         super().show_status_message(message, timeout)
 
-    # Delegate methods to component modules
     def handle_item_click(self, item: QTreeWidgetItem, next_level: int):
         return self.handlers.handle_item_click(item, next_level)
 
@@ -632,9 +366,7 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
     def create_set_sorter_view(self, cards_to_sort: List[Card], set_name: str):
         return self.navigation.create_set_sorter_view(cards_to_sort, set_name)
 
-    def _generate_level_breakdown(
-        self, current_cards: List[Card], criterion: str | None
-    ) -> List[SortGroup]:
+    def _generate_level_breakdown(self, current_cards: List[Card], criterion: str | None) -> List[SortGroup]:
         return self.navigation._generate_level_breakdown(current_cards, criterion)
 
     def _get_nested_value(self, card: Card, key: str) -> str:
@@ -673,7 +405,7 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
     def get_save_data(self) -> dict:
         return self.export.get_save_data()
 
-    def save_to_project(self, filepath: str, is_auto_save: bool = False) -> bool:
+    def save_to_project(self, filepath: str, is_auto_save: bool=False) -> bool:
         return self.export.save_to_project(filepath, is_auto_save)
 
     def load_from_project(self, filepath: str) -> bool:
