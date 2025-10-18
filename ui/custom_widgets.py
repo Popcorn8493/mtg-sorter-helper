@@ -1,9 +1,7 @@
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
-
 from core.decorators import safe_signal_method
-
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
 
@@ -54,6 +52,10 @@ class NavigableTreeWidget(QTreeWidget):
         self._operation_timer.timeout.connect(self._process_pending_operations)
         self._operation_timer.setSingleShot(True)
         self._pending_operations = []
+        self._populate_timer = QTimer()
+        self._populate_timer.timeout.connect(self._process_next_chunk)
+        self._populate_timer.setSingleShot(False)
+        self._populate_state = {'nodes': [], 'parent_item': None, 'chunk_size': 100, 'on_finished': None, 'current_index': 0, 'active': False}
         self.setToolTip("Keyboard Navigation:\n• Enter/Return - Drill down into selected group\n• Backspace - Navigate back up one level\n• Space - Mark selected group(s) as sorted\n• Ctrl+A - Select all items\n• Arrow keys - Navigate between items\n• F2 - Show item details (if available)\n\nMouse:\n• Click checkbox - Mark group as sorted/unsorted\n• Click item name - Select item\n• Double-click - Drill down into group\n• Right-click - Context menu (if available)\n\nNote: Sorted items are hidden unless 'Show Sorted' is checked")
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
         QTimer.singleShot(100, self._connect_signals)
@@ -106,6 +108,11 @@ class NavigableTreeWidget(QTreeWidget):
             self._operation_timer.stop()
         if hasattr(self, '_pending_operations'):
             self._pending_operations.clear()
+        if hasattr(self, '_populate_timer'):
+            self._populate_timer.stop()
+        if hasattr(self, '_populate_state'):
+            self._populate_state['active'] = False
+            self._populate_state['nodes'].clear()
         self.blockSignals(True)
 
     def closeEvent(self, event):
@@ -374,14 +381,34 @@ class NavigableTreeWidget(QTreeWidget):
         if self._is_destroyed:
             print('DEBUG: _populate_tree_progressively aborted - widget destroyed')
             return
+        if self._populate_state['active']:
+            print('DEBUG: Stopping existing population to start new one')
+            self._populate_timer.stop()
+            self._populate_state['active'] = False
         if parent_item is None:
             parent_item = self.invisibleRootItem()
-        chunk = nodes[:chunk_size]
-        remaining_nodes = nodes[chunk_size:]
-        print(f'DEBUG: Processing chunk of {len(chunk)} nodes, {len(remaining_nodes)} remaining')
+        self._populate_state = {'nodes': nodes, 'parent_item': parent_item, 'chunk_size': chunk_size, 'on_finished': on_finished, 'current_index': 0, 'active': True}
+        print(f'DEBUG: Starting progressive population with {len(nodes)} nodes')
+        self._populate_timer.start(1)
+
+    def _process_next_chunk(self):
+        if self._is_destroyed or not self._populate_state['active']:
+            if self._populate_timer.isActive():
+                self._populate_timer.stop()
+            return
+        state = self._populate_state
+        nodes = state['nodes']
+        parent_item = state['parent_item']
+        chunk_size = state['chunk_size']
+        current_index = state['current_index']
+        chunk_start = current_index
+        chunk_end = min(current_index + chunk_size, len(nodes))
+        remaining = len(nodes) - chunk_end
+        print(f'DEBUG: Processing chunk {chunk_start}-{chunk_end} of {len(nodes)} nodes, {remaining} remaining')
         try:
-            for i, node in enumerate(chunk):
+            for i in range(chunk_start, chunk_end):
                 try:
+                    node = nodes[i]
                     tree_item = SortableTreeWidgetItem(parent_item, [node.group_name, str(node.count)])
                     tree_item.setData(0, Qt.ItemDataRole.UserRole, node.cards)
                     tree_item.setFlags(tree_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -419,34 +446,37 @@ class NavigableTreeWidget(QTreeWidget):
             print(f'ERROR: Failed during chunk processing: {e}')
             import traceback
             traceback.print_exc()
+            self._populate_timer.stop()
+            state['active'] = False
             return
-        if remaining_nodes:
-            print(f'DEBUG: Scheduling next chunk ({len(remaining_nodes)} nodes remaining)')
-            QTimer.singleShot(0, lambda: self._populate_tree_progressively(remaining_nodes, parent_item, chunk_size, on_finished))
-        else:
+        state['current_index'] = chunk_end
+        if chunk_end >= len(nodes):
             print('DEBUG: Final chunk completed, running final actions...')
+            self._populate_timer.stop()
+            state['active'] = False
+            self._finalize_population()
 
-            def final_actions():
-                if self._is_destroyed:
-                    print('DEBUG: final_actions aborted - widget destroyed')
-                    return
+    def _finalize_population(self):
+        if self._is_destroyed:
+            print('DEBUG: _finalize_population aborted - widget destroyed')
+            return
+        try:
+            print('DEBUG: Sorting tree...')
+            self.sortByColumn(self.sortColumn(), self.header().sortIndicatorOrder())
+            print('DEBUG: Tree sorted, calling on_finished callback...')
+            on_finished = self._populate_state.get('on_finished')
+            if on_finished:
                 try:
-                    print('DEBUG: Sorting tree...')
-                    self.sortByColumn(self.sortColumn(), self.header().sortIndicatorOrder())
-                    print('DEBUG: Tree sorted, calling on_finished callback...')
-                    if on_finished:
-                        try:
-                            on_finished()
-                            print('DEBUG: on_finished callback completed')
-                        except Exception as e:
-                            print(f'ERROR: on_finished callback failed: {e}')
-                            import traceback
-                            traceback.print_exc()
+                    on_finished()
+                    print('DEBUG: on_finished callback completed')
                 except Exception as e:
-                    print(f'ERROR: final_actions failed: {e}')
+                    print(f'ERROR: on_finished callback failed: {e}')
                     import traceback
                     traceback.print_exc()
-            QTimer.singleShot(0, final_actions)
+        except Exception as e:
+            print(f'ERROR: _finalize_population failed: {e}')
+            import traceback
+            traceback.print_exc()
 
     def _on_item_changed(self, item, column):
         if self._is_destroyed or not item or column != 0:
