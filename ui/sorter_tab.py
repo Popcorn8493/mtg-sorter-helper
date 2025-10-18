@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication, QTreeWidgetItem, QTreeWidgetItemIterat
 from api.scryfall_api import ScryfallAPI
 from core.decorators import safe_ui_method, safe_cleanup_method
 from core.models import Card, SortGroup
-from ui.custom_widgets import NavigableTreeWidget
+from ui.custom_widgets import EmptyState, NavigableTreeWidget
 from ui.set_sorter_view import SetSorterView
 from ui.sorter_export import SorterExport
 from ui.sorter_handlers import SorterHandlers
@@ -130,6 +130,8 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
         self.ui.setup_ui(self.layout())
         StatusAwareMixin.__init__(self)
         self._init_status_manager()
+        # Show empty state initially when no collection is loaded
+        self._show_empty_state()
 
     @safe_ui_method('Plan generation failed')
     def _start_plan_generation(self):
@@ -146,6 +148,9 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
             return
         self._is_generating_plan = True
         try:
+            # Hide empty state if it's showing
+            self._hide_empty_state()
+
             self.navigation.clear_layout(self.breadcrumb_layout)
             self._clear_stack()
             self.preview.reset_preview_pane()
@@ -168,6 +173,43 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
                     widget.cleanup()
                 widget.deleteLater()
         QApplication.processEvents()
+
+    def _show_empty_state(self):
+        """Display the empty state widget when no collection is loaded."""
+        if self._is_destroyed:
+            return
+        try:
+            # Clear existing widgets in the stack
+            self._clear_stack()
+
+            # Create and add the empty state widget
+            empty_state = EmptyState(
+                title="No Collection Loaded",
+                message="Import a collection CSV file to begin organizing your cards. "
+                        "ManaBox and Lion's Eye Diamond formats are supported.",
+                action_text="Import Collection",
+                action_callback=self.import_csv
+            )
+            self.results_stack.addWidget(empty_state)
+            self.results_stack.setCurrentWidget(empty_state)
+
+            # Hide preview panel and filter when showing empty state
+            self.preview_panel.setVisible(False)
+            self.filter_edit.setVisible(False)
+        except Exception as e:
+            self.handle_ui_error('showing empty state', e)
+
+    def _hide_empty_state(self):
+        """Remove the empty state widget when a collection is loaded."""
+        if self._is_destroyed:
+            return
+        try:
+            # Check if current widget is EmptyState and remove it
+            current_widget = self.results_stack.currentWidget()
+            if isinstance(current_widget, EmptyState):
+                self._clear_stack()
+        except Exception as e:
+            self.handle_ui_error('hiding empty state', e)
 
     def _refresh_current_view(self):
         if self._is_destroyed or self._is_refreshing:

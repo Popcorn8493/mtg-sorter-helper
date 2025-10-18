@@ -15,8 +15,13 @@ class SorterNavigation:
         self.parent = parent
 
     def add_breadcrumb(self, text: str, level: int):
+        # Add separator if not the first breadcrumb
         if level > 0:
-            self.parent.breadcrumb_layout.addWidget(QLabel('>'))
+            separator = QLabel(' › ')
+            separator.setStyleSheet('color: #666;')
+            self.parent.breadcrumb_layout.addWidget(separator)
+
+        # Create breadcrumb button with BreadcrumbButton styling from ThemeManager
         btn = QPushButton(text.split(': ')[-1])
         btn.setObjectName('BreadcrumbButton')
         btn.clicked.connect(lambda: self.parent.navigate_and_refresh(level))

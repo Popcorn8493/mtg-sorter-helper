@@ -107,27 +107,29 @@ class NavigationManager(QObject):
                 if widget:
                     self.breadcrumb_layout.removeWidget(widget)
                     widget.deleteLater()
-        root_button = QPushButton('Root')
-        root_button.setFlat(True)
-        root_button.setStyleSheet('QPushButton { text-decoration: underline; color: #007acc; }')
-        root_button.clicked.connect(lambda: self.navigate_to_breadcrumb(-1))
-        self.breadcrumb_layout.addWidget(root_button)
+        self._create_breadcrumb('Root', lambda: self.navigate_to_breadcrumb(-1))
         for i, path_element in enumerate(self.current_path):
-            separator = QLabel(' > ')
-            separator.setStyleSheet('color: #666666;')
-            self.breadcrumb_layout.addWidget(separator)
             if i == len(self.current_path) - 1:
                 current_label = QLabel(path_element)
                 current_label.setStyleSheet('font-weight: bold; color: white;')
                 self.breadcrumb_layout.addWidget(current_label)
             else:
-                breadcrumb_button = QPushButton(path_element)
-                breadcrumb_button.setFlat(True)
-                breadcrumb_button.setStyleSheet('QPushButton { text-decoration: underline; color: #007acc; }')
-                breadcrumb_button.clicked.connect(lambda checked, idx=i: self.navigate_to_breadcrumb(idx))
-                self.breadcrumb_layout.addWidget(breadcrumb_button)
+                self._create_breadcrumb(path_element, lambda idx=i: self.navigate_to_breadcrumb(idx))
         self.breadcrumb_layout.addStretch()
         self.breadcrumb_updated.emit(self.current_path.copy())
+
+    def _create_breadcrumb(self, label: str, callback):
+        """Create a breadcrumb button with visual separator."""
+        if self.breadcrumb_layout.count() > 0:
+            separator = QLabel(' › ')
+            separator.setStyleSheet('color: #666;')
+            self.breadcrumb_layout.addWidget(separator)
+
+        # Use BreadcrumbButton object name to apply ThemeManager stylesheet
+        breadcrumb_button = QPushButton(label)
+        breadcrumb_button.setObjectName('BreadcrumbButton')
+        breadcrumb_button.clicked.connect(callback)
+        self.breadcrumb_layout.addWidget(breadcrumb_button)
 
     def _add_to_history(self):
         state = {'path': self.current_path.copy(), 'sort_groups': self.current_sort_groups.copy(), 'cards': self.current_cards.copy(), 'sort_order': self.current_sort_order.copy()}

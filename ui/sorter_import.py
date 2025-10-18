@@ -150,7 +150,10 @@ class SorterImport:
         self.progress_to_load = None
         self.parent.file_label.setText('No file loaded.')
         self.parent.clear_layout(self.parent.breadcrumb_layout)
-        self.parent._clear_stack()
+
+        # Show empty state when project is cleared
+        self.parent._show_empty_state()
+
         self.parent.reset_preview_pane()
         self.parent.filter_edit.clear()
         self.parent.filter_edit.setVisible(False)

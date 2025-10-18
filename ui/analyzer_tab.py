@@ -461,6 +461,9 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             spine.set_color('white')
         if len(labels) > 10:
             self.ax.tick_params(axis='x', rotation=45)
+            for label in self.ax.get_xticklabels():
+                label.set_ha('right')
+            self.canvas.figure.subplots_adjust(bottom=0.2)
         self.canvas.figure.tight_layout()
         self.canvas.draw_idle()
 

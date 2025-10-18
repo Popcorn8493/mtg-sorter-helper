@@ -1,6 +1,6 @@
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
 from PyQt6.QtGui import QColor, QKeyEvent, QMouseEvent
-from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem
+from PyQt6.QtWidgets import QTreeWidget, QTreeWidgetItem, QWidget, QVBoxLayout, QLabel, QPushButton
 from core.decorators import safe_signal_method
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
@@ -556,3 +556,59 @@ class StatusAwareWidget(QObject):
         if not self._is_destroyed:
             self._status_message = ''
             self._status_timeout = 0
+
+
+class EmptyState(QWidget):
+    """
+    Reusable empty state widget for when no data exists.
+
+    Displays an icon, title, message, and optional action button in a centered layout.
+    """
+
+    def __init__(self, title: str, message: str, action_text: str = None, action_callback=None, parent=None):
+        """
+        Create an empty state widget.
+
+        Args:
+            title: Bold title text to display
+            message: Descriptive message explaining the empty state
+            action_text: Optional text for action button
+            action_callback: Optional callback function when action button is clicked
+            parent: Parent widget
+        """
+        super().__init__(parent)
+
+        # Create layout
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(20)
+
+        # Icon label (📦 emoji, 48px, centered)
+        icon_label = QLabel('📦')
+        icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_label.setStyleSheet('font-size: 48px;')
+        layout.addWidget(icon_label)
+
+        # Title label (16pt, bold, centered)
+        title_label = QLabel(title)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet('font-size: 16pt; font-weight: bold;')
+        layout.addWidget(title_label)
+
+        # Message label (centered, word-wrapped)
+        message_label = QLabel(message)
+        message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        message_label.setWordWrap(True)
+        message_label.setMaximumWidth(400)
+        message_label.setStyleSheet('font-size: 11pt; color: #888;')
+        layout.addWidget(message_label)
+
+        # Action button (if provided)
+        if action_text and action_callback:
+            action_button = QPushButton(action_text)
+            action_button.setObjectName('AccentButton')
+            action_button.clicked.connect(action_callback)
+            action_button.setMaximumWidth(200)
+            layout.addWidget(action_button, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addStretch()
