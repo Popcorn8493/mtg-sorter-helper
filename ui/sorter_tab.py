@@ -55,7 +55,7 @@ class ManaBoxSorterTab(QWidget, StatusAwareMixin):
         self.export = SorterExport(self)
         self.import_module = SorterImport(self)
         QVBoxLayout(self)
-        QTimer.singleShot(0, self.setup_ui)
+        self.setup_ui()
 
     def cleanup_workers(self):
         self.worker_manager.cleanup_all()

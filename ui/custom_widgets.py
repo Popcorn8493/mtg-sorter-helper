@@ -58,7 +58,7 @@ class NavigableTreeWidget(QTreeWidget):
         self._populate_state = {'nodes': [], 'parent_item': None, 'chunk_size': 100, 'on_finished': None, 'current_index': 0, 'active': False}
         self.setToolTip("Keyboard Navigation:\n• Enter/Return - Drill down into selected group\n• Backspace - Navigate back up one level\n• Space - Mark selected group(s) as sorted\n• Ctrl+A - Select all items\n• Arrow keys - Navigate between items\n• F2 - Show item details (if available)\n\nMouse:\n• Click checkbox - Mark group as sorted/unsorted\n• Click item name - Select item\n• Double-click - Drill down into group\n• Right-click - Context menu (if available)\n\nNote: Sorted items are hidden unless 'Show Sorted' is checked")
         self.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
-        QTimer.singleShot(100, self._connect_signals)
+        self._connect_signals()
 
     @safe_signal_method('Signal connection failed')
     def _connect_signals(self):
@@ -485,7 +485,7 @@ class NavigableTreeWidget(QTreeWidget):
             if hasattr(item, 'checkState'):
                 current_state = item.checkState(0)
                 is_sorted = current_state == Qt.CheckState.Checked
-                QTimer.singleShot(0, lambda: self.itemSortedToggled.emit(item, is_sorted))
+                self.itemSortedToggled.emit(item, is_sorted)
         except Exception as e:
             print(f'Error handling item change: {e}')
 

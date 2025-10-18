@@ -1,4 +1,5 @@
 import csv
+import time
 from typing import Any, Dict
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -45,9 +46,22 @@ class LionsEyeImportWorker(QObject):
         self.csv_path = csv_path
         self.api = api
         self._is_cancelled = False
+        self._last_progress_time = 0
+        self._min_update_interval = 0.1  # 100ms between updates (10 updates/sec max)
 
     def cancel(self):
         self._is_cancelled = True
+
+    def _should_emit_progress(self, current: int, total: int) -> bool:
+        """Emit only if enough time passed OR operation complete"""
+        if current == total:
+            return True  # Always emit final update
+
+        now = time.time()
+        if now - self._last_progress_time >= self._min_update_interval:
+            self._last_progress_time = now
+            return True
+        return False
 
     def process(self):
         try:
@@ -76,7 +90,8 @@ class LionsEyeImportWorker(QObject):
                         continue
                     scryfall_ids.add(scryfall_id)
                     card_quantities[scryfall_id] = card_quantities.get(scryfall_id, 0) + total_quantity
-                    if row_num % 100 == 0:
+                    # Time-throttled progress updates during CSV parsing
+                    if self._should_emit_progress(row_num, total_rows if total_rows > 0 else 1):
                         self.progress.emit(min(row_num, total_rows // 2), total_rows if total_rows > 0 else 1)
             if total_rows == 0:
                 self.error.emit('CSV file appears to be empty or has no valid data.')
@@ -117,7 +132,8 @@ class LionsEyeImportWorker(QObject):
                     except Exception as processing_error:
                         print(f'Error processing card {i + 1}/{len(unique_ids)} (ID: {scryfall_id}): {processing_error}')
                         continue
-                    if i % 10 == 0 or i == len(unique_ids) - 1:
+                    # Time-throttled progress updates during card processing
+                    if self._should_emit_progress(i + 1, len(unique_ids)):
                         try:
                             self.progress.emit(i + 1, len(unique_ids))
                         except Exception as progress_error:
@@ -320,9 +336,22 @@ class SetAnalysisWorker(QObject):
         self.api = api
         self._is_cancelled = False
         self.raw_cards: list[dict] = []
+        self._last_progress_time = 0
+        self._min_update_interval = 0.1  # 100ms between updates (10 updates/sec max)
 
     def cancel(self):
         self._is_cancelled = True
+
+    def _should_emit_progress(self, current: int, total: int) -> bool:
+        """Emit only if enough time passed OR operation complete"""
+        if current == total:
+            return True  # Always emit final update
+
+        now = time.time()
+        if now - self._last_progress_time >= self._min_update_interval:
+            self._last_progress_time = now
+            return True
+        return False
 
     def process(self):
         try:
@@ -387,8 +416,9 @@ class SetAnalysisWorker(QObject):
                 if source_set not in letter_counts[first_letter]['set_breakdown']:
                     letter_counts[first_letter]['set_breakdown'][source_set] = 0
                 letter_counts[first_letter]['set_breakdown'][source_set] += 1
-                if i % 100 == 0 or i == total_cards - 1:
-                    self.progress.emit(i, total_cards)
+                # Time-throttled progress updates during card analysis
+                if self._should_emit_progress(i + 1, total_cards):
+                    self.progress.emit(i + 1, total_cards)
             if self._is_cancelled:
                 return
             if self.options.get('group', False):

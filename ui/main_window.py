@@ -28,7 +28,7 @@ class MTGToolkitWindow(QMainWindow):
         tab_widget.addTab(self.analyzer_tab, 'Set Analyzer')
         self._create_actions()
         self._create_menus()
-        QTimer.singleShot(0, self._startup_sequence)
+        self._startup_sequence()
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self.auto_save_project)
         self.auto_save_timer.start(Config.AUTO_SAVE_INTERVAL)

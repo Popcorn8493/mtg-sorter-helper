@@ -384,13 +384,41 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         except Exception as e:
             QMessageBox.critical(self, 'WUBRG Export Error', f'Failed to export WUBRG results:\n\n{str(e)}')
 
-    def redraw_chart(self):
+    def redraw_chart(self, force_recreate=False):
+        """Redraw the chart with optimized incremental updates when possible.
+
+        Args:
+            force_recreate: If True, forces a complete chart recreation (default: False)
+        """
         if self.last_analysis_data is None:
             return
         if not self.ax:
             return
-        self.ax.clear()
+
         data = self.last_analysis_data
+        color_mode = self.color_by_combo.currentText()
+
+        # Check if we need to recreate the chart structure
+        # (data structure changed, color mode changed, or forced)
+        labels = [item[0] for item in data['sorted_groups']] if data['sorted_groups'] else []
+        current_chart_key = (tuple(labels), color_mode, data.get('weighted', False))
+
+        need_recreate = (
+            force_recreate or
+            not hasattr(self, '_last_chart_key') or
+            self._last_chart_key != current_chart_key or
+            color_mode == 'WUBRG Colors'  # WUBRG charts always recreate for now
+        )
+
+        if need_recreate:
+            self._last_chart_key = current_chart_key
+            self.ax.clear()
+            # Clear all cached chart objects when recreating
+            for attr in ['_chart_bars', '_chart_texts', '_rarity_bars', '_set_bars', '_set_texts', '_multiset_bars']:
+                if hasattr(self, attr):
+                    delattr(self, attr)
+
+        # Handle empty data case
         if not data['sorted_groups']:
             self.ax.text(0.5, 0.5, 'No cards to display.\n(You might own the entire set!)', ha='center', va='center', color='white', fontsize=12, transform=self.ax.transAxes)
             set_codes = data.get('set_codes', [data.get('set_code', '')])
@@ -401,33 +429,21 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             if 'missing_count' in data:
                 title += ' (Missing Cards)'
             self.ax.set_title(title, color='white')
-            self.canvas.draw()
-            self.canvas.flush_events()
-            if self.toolbar:
-                self.toolbar.update()
+            self.canvas.draw_idle()
             return
-        color_mode = self.color_by_combo.currentText()
-        labels = [item[0] for item in data['sorted_groups']]
-        if color_mode == 'None':
-            values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
-            bars = self.ax.bar(labels, values, color='#007acc')
-            for bar, value in zip(bars, values):
-                if value > 0:
-                    self.ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(int(value)), ha='center', va='bottom', color='white', fontsize=8)
-        elif color_mode == 'WUBRG Colors':
+
+        # Render chart based on color mode
+        if color_mode == 'WUBRG Colors':
             self._create_wubrg_charts(data)
             return
+        elif color_mode == 'None':
+            self._update_simple_chart(data, labels, need_recreate)
         elif color_mode == 'Set':
-            self._create_set_colored_chart(data, labels)
+            self._create_set_colored_chart(data, labels, need_recreate)
         else:
-            all_rarities = sorted(list(self.RARITY_COLORS.keys()))
-            bottoms = {label: 0 for label in labels}
-            for rarity in all_rarities:
-                values = [item[1]['rarity'].get(rarity, 0) for item in data['sorted_groups']]
-                bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels], color=self.RARITY_COLORS.get(rarity, '#ffffff'), label=rarity.title())
-                for i, label in enumerate(labels):
-                    bottoms[label] += values[i]
-            self.ax.legend(labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
+            self._update_rarity_chart(data, labels, need_recreate)
+
+        # Update chart labels and styling
         set_codes = data.get('set_codes', [data.get('set_code', '')])
         if len(set_codes) == 1:
             title = f'Card Distribution for Set: {set_codes[0].upper()}'
@@ -446,36 +462,180 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         if len(labels) > 10:
             self.ax.tick_params(axis='x', rotation=45)
         self.canvas.figure.tight_layout()
-        self.canvas.draw()
-        self.canvas.flush_events()
-        if self.toolbar:
-            self.toolbar.update()
+        self.canvas.draw_idle()
 
-    def _create_set_colored_chart(self, data, labels):
-        set_codes = data.get('set_codes', [])
-        if len(set_codes) <= 1:
-            values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
-            bars = self.ax.bar(labels, values, color=self.SET_COLORS[0])
-            for bar, value in zip(bars, values):
+    def _update_simple_chart(self, data, labels, need_recreate):
+        """Update simple single-color chart with incremental updates."""
+        values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
+
+        if need_recreate or not hasattr(self, '_chart_bars'):
+            # Create new chart
+            self._chart_bars = self.ax.bar(labels, values, color='#007acc')
+            self._chart_texts = []
+            for bar, value in zip(self._chart_bars, values):
                 if value > 0:
-                    self.ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01, str(int(value)), ha='center', va='bottom', color='white', fontsize=8)
-            return
-        set_colors = {set_code: self.SET_COLORS[i % len(self.SET_COLORS)] for i, set_code in enumerate(set_codes)}
-        bottoms = {label: 0 for label in labels}
-        legend_handles = []
-        for set_code in set_codes:
-            values = []
-            for item in data['sorted_groups']:
-                set_breakdown = item[1].get('set_breakdown', {})
-                values.append(set_breakdown.get(set_code, 0))
-            if any((v > 0 for v in values)):
-                bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels], color=set_colors[set_code], label=set_code.upper())
+                    text = self.ax.text(bar.get_x() + bar.get_width() / 2,
+                                      bar.get_height() + max(values) * 0.01,
+                                      str(int(value)),
+                                      ha='center', va='bottom', color='white', fontsize=8)
+                    self._chart_texts.append(text)
+        else:
+            # Update existing chart
+            max_val = max(values) if values else 1
+            for bar, value in zip(self._chart_bars, values):
+                bar.set_height(value)
+
+            # Update text labels
+            text_idx = 0
+            for bar, value in zip(self._chart_bars, values):
+                if value > 0:
+                    if text_idx < len(self._chart_texts):
+                        text = self._chart_texts[text_idx]
+                        text.set_position((bar.get_x() + bar.get_width() / 2,
+                                         bar.get_height() + max_val * 0.01))
+                        text.set_text(str(int(value)))
+                        text_idx += 1
+
+            # Rescale axes if needed
+            self.ax.relim()
+            self.ax.autoscale_view()
+
+    def _update_rarity_chart(self, data, labels, need_recreate):
+        """Update stacked rarity chart with incremental updates when possible."""
+        all_rarities = sorted(list(self.RARITY_COLORS.keys()))
+
+        if need_recreate or not hasattr(self, '_rarity_bars'):
+            # Create new stacked chart
+            bottoms = {label: 0 for label in labels}
+            self._rarity_bars = {}  # Dict mapping rarity -> BarContainer
+
+            for rarity in all_rarities:
+                values = [item[1]['rarity'].get(rarity, 0) for item in data['sorted_groups']]
+                bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels],
+                                 color=self.RARITY_COLORS.get(rarity, '#ffffff'), label=rarity.title())
+                self._rarity_bars[rarity] = bars
                 for i, label in enumerate(labels):
                     bottoms[label] += values[i]
+            self.ax.legend(labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
+        else:
+            # Update existing stacked chart
+            bottoms = {label: 0 for label in labels}
+
+            for rarity in all_rarities:
+                values = [item[1]['rarity'].get(rarity, 0) for item in data['sorted_groups']]
+                bars = self._rarity_bars.get(rarity)
+
                 if bars:
-                    legend_handles.append(bars[0])
-        if legend_handles:
-            self.ax.legend(handles=legend_handles, labels=[set_code.upper() for set_code in set_codes if any((item[1].get('set_breakdown', {}).get(set_code, 0) > 0 for item in data['sorted_groups']))], labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
+                    # Update bar heights and positions
+                    bottom_list = [bottoms[label] for label in labels]
+                    for bar, value, bottom in zip(bars, values, bottom_list):
+                        bar.set_height(value)
+                        bar.set_y(bottom)
+
+                    # Update bottoms for next rarity layer
+                    for i, label in enumerate(labels):
+                        bottoms[label] += values[i]
+
+            # Rescale axes
+            self.ax.relim()
+            self.ax.autoscale_view()
+
+    def _create_set_colored_chart(self, data, labels, need_recreate=True):
+        """Update multi-set stacked chart with incremental updates when possible."""
+        set_codes = data.get('set_codes', [])
+
+        # Handle single set case (simpler, no stacking)
+        if len(set_codes) <= 1:
+            values = [item[1]['total_weighted' if data['weighted'] else 'total_raw'] for item in data['sorted_groups']]
+
+            if need_recreate or not hasattr(self, '_set_bars'):
+                # Create new chart
+                self._set_bars = self.ax.bar(labels, values, color=self.SET_COLORS[0])
+                self._set_texts = []
+                for bar, value in zip(self._set_bars, values):
+                    if value > 0:
+                        text = self.ax.text(bar.get_x() + bar.get_width() / 2,
+                                          bar.get_height() + max(values) * 0.01,
+                                          str(int(value)),
+                                          ha='center', va='bottom', color='white', fontsize=8)
+                        self._set_texts.append(text)
+            else:
+                # Update existing chart
+                max_val = max(values) if values else 1
+                for bar, value in zip(self._set_bars, values):
+                    bar.set_height(value)
+
+                # Update text labels
+                text_idx = 0
+                for bar, value in zip(self._set_bars, values):
+                    if value > 0:
+                        if text_idx < len(self._set_texts):
+                            text = self._set_texts[text_idx]
+                            text.set_position((bar.get_x() + bar.get_width() / 2,
+                                             bar.get_height() + max_val * 0.01))
+                            text.set_text(str(int(value)))
+                            text_idx += 1
+
+                # Rescale axes
+                self.ax.relim()
+                self.ax.autoscale_view()
+            return
+
+        # Handle multi-set stacked chart
+        set_colors = {set_code: self.SET_COLORS[i % len(self.SET_COLORS)] for i, set_code in enumerate(set_codes)}
+
+        if need_recreate or not hasattr(self, '_multiset_bars'):
+            # Create new stacked chart
+            bottoms = {label: 0 for label in labels}
+            legend_handles = []
+            self._multiset_bars = {}  # Dict mapping set_code -> BarContainer
+
+            for set_code in set_codes:
+                values = []
+                for item in data['sorted_groups']:
+                    set_breakdown = item[1].get('set_breakdown', {})
+                    values.append(set_breakdown.get(set_code, 0))
+
+                if any((v > 0 for v in values)):
+                    bars = self.ax.bar(labels, values, bottom=[bottoms[label] for label in labels],
+                                     color=set_colors[set_code], label=set_code.upper())
+                    self._multiset_bars[set_code] = bars
+                    for i, label in enumerate(labels):
+                        bottoms[label] += values[i]
+                    if bars:
+                        legend_handles.append(bars[0])
+
+            if legend_handles:
+                self.ax.legend(handles=legend_handles,
+                             labels=[set_code.upper() for set_code in set_codes
+                                   if any((item[1].get('set_breakdown', {}).get(set_code, 0) > 0
+                                         for item in data['sorted_groups']))],
+                             labelcolor='white', facecolor='#3c3f41', edgecolor='#555', loc='upper right')
+        else:
+            # Update existing stacked chart
+            bottoms = {label: 0 for label in labels}
+
+            for set_code in set_codes:
+                values = []
+                for item in data['sorted_groups']:
+                    set_breakdown = item[1].get('set_breakdown', {})
+                    values.append(set_breakdown.get(set_code, 0))
+
+                bars = self._multiset_bars.get(set_code)
+                if bars and any((v > 0 for v in values)):
+                    # Update bar heights and positions
+                    bottom_list = [bottoms[label] for label in labels]
+                    for bar, value, bottom in zip(bars, values, bottom_list):
+                        bar.set_height(value)
+                        bar.set_y(bottom)
+
+                    # Update bottoms for next set layer
+                    for i, label in enumerate(labels):
+                        bottoms[label] += values[i]
+
+            # Rescale axes
+            self.ax.relim()
+            self.ax.autoscale_view()
 
     def _extract_letter_grouping_from_data(self, data):
         letter_mapping = {}
@@ -505,10 +665,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.ax.clear()
         if not hasattr(self, 'last_analysis_cards') or not self.last_analysis_cards:
             self.ax.text(0.5, 0.5, 'WUBRG analysis requires card data.\nPlease re-run the analysis.', ha='center', va='center', color='white', fontsize=14, weight='bold', transform=self.ax.transAxes)
-            self.canvas.draw()
-            self.canvas.flush_events()
-            if self.toolbar:
-                self.toolbar.update()
+            self.canvas.draw_idle()
             return
         letter_mapping = self._extract_letter_grouping_from_data(data)
         single_color_groups = {color: [] for color in wubrg_colors.keys()}
@@ -540,10 +697,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             charts_to_create.append(('lands', None, {'name': 'Lands', 'color': '#8b4513'}, land_cards))
         if not charts_to_create:
             self.ax.text(0.5, 0.5, 'No cards to display in WUBRG analysis.', ha='center', va='center', color='white', fontsize=14, weight='bold', transform=self.ax.transAxes)
-            self.canvas.draw()
-            self.canvas.flush_events()
-            if self.toolbar:
-                self.toolbar.update()
+            self.canvas.draw_idle()
             return
         num_charts = len(charts_to_create)
         if num_charts <= 4:
@@ -621,11 +775,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         if 'missing_count' in data:
             title += ' - Missing Only'
         fig.suptitle(title, color='white', fontsize=16, y=0.96, weight='bold')
-        self.canvas.draw()
-        self.canvas.flush_events()
-        if self.toolbar:
-            self.toolbar.update()
-            self.canvas.figure.canvas.toolbar = self.toolbar
+        self.canvas.draw_idle()
         if hasattr(self, 'last_analysis_cards') and self.last_analysis_cards and (self.color_by_combo.currentText() == 'WUBRG Colors'):
             self._add_wubrg_export_buttons()
 
@@ -848,8 +998,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.maximize_button.setToolTip('Restore normal view')
         self.maximized_dialog.show()
         if self.canvas:
-            self.canvas.draw()
-            self.canvas.flush_events()
+            self.canvas.draw_idle()
 
     def _restore_chart(self):
         if not self.maximized_dialog:
@@ -874,8 +1023,7 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
         self.maximized_dialog.deleteLater()
         self.maximized_dialog = None
         if self.canvas:
-            self.canvas.draw()
-            self.canvas.flush_events()
+            self.canvas.draw_idle()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self.maximized_dialog:
@@ -884,18 +1032,26 @@ class SetAnalyzerTab(QWidget, StatusAwareMixin):
             super().keyPressEvent(event)
 
     def resizeEvent(self, event):
+        """Handle window resize events with debouncing to reduce redraws."""
         super().resizeEvent(event)
         if self.canvas and self.canvas.isVisible():
             self.canvas.updateGeometry()
             if self.last_analysis_data:
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(100, self._handle_resize_redraw)
+                # Debounce resize events to avoid excessive redraws
+                if not hasattr(self, '_resize_timer'):
+                    from PyQt6.QtCore import QTimer
+                    self._resize_timer = QTimer()
+                    self._resize_timer.setSingleShot(True)
+                    self._resize_timer.timeout.connect(self._handle_resize_redraw)
+                # Restart timer on each resize event (debouncing)
+                self._resize_timer.stop()
+                self._resize_timer.start(250)  # Wait 250ms after last resize
 
     def _handle_resize_redraw(self):
+        """Handle the actual chart redraw after resize debouncing."""
         if self.canvas and self.last_analysis_data:
             try:
-                self.canvas.draw()
-                if self.toolbar:
-                    self.toolbar.update()
+                # Use draw_idle for smoother updates
+                self.canvas.draw_idle()
             except Exception:
                 pass
